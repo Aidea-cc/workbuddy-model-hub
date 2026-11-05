@@ -2,6 +2,7 @@
   "name": "workbuddy-model-hub",
   "version": "0.0.1",
   "private": true,
+  "license": "UNLICENSED",
   "description": "WorkBuddy 多服务商模型中心：同名模型本地别名网关与可视化配置",
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.js"
