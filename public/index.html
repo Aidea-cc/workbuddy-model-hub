@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorkBuddy 模型中心 · 配置</title>
+<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css?v=0.0.1">
+</head>
+<body>
+<main class="wrap">
+  <header class="top hero">
+    <div class="brand">
+      <div class="brand-mark"><img class="brand-logo" src="/logo.svg" width="40" height="40" alt=""></div>
+      <div class="brand-text">
+        <div class="brand-line"><h1>WorkBuddy 模型中心</h1><span class="ver">v0.0.1</span></div>
+        <p class="sub">多平台同名模型 · 本地 ID 唯一 · 别名网关按渠道还原真实模型名</p>
+      </div>
+    </div>
+    <div class="hero-side">
+      <div id="status" class="status" aria-live="polite">连接中</div>
+      <span class="hero-port">127.0.0.1:<b id="statPort">8787</b></span>
+    </div>
+  </header>
+
+  <section class="stats" aria-label="运行概览">
+    <div class="stat"><span class="stat-dot d1"></span><div class="stat-label">服务商分组</div><div class="stat-value" id="statProviders">0</div><div class="stat-foot">每组共用一套配置</div></div>
+    <div class="stat"><span class="stat-dot d2"></span><div class="stat-label">模型渠道</div><div class="stat-value" id="statModels">0</div><div class="stat-foot">勾选即自动生成</div></div>
+    <div class="stat"><span class="stat-dot d3"></span><div class="stat-label">已启用</div><div class="stat-value" id="statEnabled">0</div><div class="stat-foot">可写入客户端</div></div>
+    <div class="stat"><span class="stat-dot d4"></span><div class="stat-label">客户端配置</div><div class="stat-value" id="statWrite">待写入</div><div class="stat-foot">备份并写入后更新</div></div>
+  </section>
+
+  <!-- 一个服务商 = 一组：共用信息 + 自己的模型列表 + 派生渠道 -->
+  <section class="card">
+    <div class="card-head">
+      <h2><span class="step">01</span>服务商与模型 <span class="h3-note" id="groupCount"></span></h2>
+      <div class="actions">
+        <button id="btnFoldAll" class="btn ghost small">全部收起</button>
+        <button id="btnAddProvider" class="btn primary small">+ 添加服务商</button>
+        <details class="more">
+          <summary class="btn ghost small">更多操作</summary>
+          <div class="more-menu">
+            <button id="btnAddStandalone" class="btn ghost small">+ 独立渠道</button>
+            <button id="btnPresets" class="btn ghost small">载入示例</button>
+            <button id="btnSave" class="btn ghost small">保存全部</button>
+          </div>
+        </details>
+      </div>
+    </div>
+    <div id="msg" class="msg top-msg" aria-live="polite"></div>
+    <details class="intro">
+      <summary>分组规则与自动保存说明</summary>
+      <p class="hint">一个服务商就是一张卡片：共用名字 / 地址 / 密钥，勾选模型即自动生成渠道，改一处整组生效。所有改动自动保存，刷新或重启都不会丢。模型清单与渠道列表默认收起，按需点开；点标题旁的箭头可收起整组。接新平台点「+ 添加服务商」。</p>
+    </details>
+    <div id="providers" class="providers"></div>
+
+    <div id="standaloneWrap" class="standalone-wrap" hidden>
+      <h3>独立渠道 <span class="h3-note">不属于任何服务商，需自行逐条填写</span></h3>
+      <div id="standalone" class="channels"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2><span class="step">02</span>导出客户端配置</h2>
+      <div class="actions">
+        <button id="btnPreview" class="btn ghost small">生成</button>
+        <button id="btnCopy" class="btn ghost small">复制</button>
+        <button id="btnDownload" class="btn ghost small">下载片段</button>
+      </div>
+    </div>
+    <div id="exportMsg" class="msg" aria-live="polite"></div>
+    <div class="apply">
+      <input id="targetPath" type="text" placeholder="models.json 绝对路径，填过一次会自动记住">
+      <button id="btnApply" class="btn primary">备份并写入</button>
+    </div>
+    <div id="applyResult" class="apply-result" aria-live="polite"></div>
+
+    <details class="fold out-fold" id="outputWrap">
+      <summary>配置片段 <span class="fold-note" id="outputCount"></span></summary>
+      <div class="fold-body"><pre id="output" class="output">点击「生成」查看配置片段</pre></div>
+    </details>
+
+    <details class="advanced card-advanced">
+      <summary>高级设置（显示名格式 · 访问令牌 · 写入说明）</summary>
+      <div class="name-style-row">
+        <label for="nameTemplate">统一显示名格式</label>
+        <input id="nameTemplate" type="text" placeholder="{provider}·{model}">
+        <button id="btnNameReset" class="btn ghost small">恢复默认</button>
+        <span class="hint" style="margin:0">同时作为模型 ID，让设置页 / 下拉 / 本页三处一致。变量：{provider}、{model}、{modelLower}、{fullModel}、{alias}；默认 <code>{provider}·{modelLower}</code> 全小写，想保留上游大小写改成 <code>{provider}·{model}</code>，改完点「备份并写入」覆盖旧名称。</span>
+      </div>
+      <div class="token-row">
+        <label for="token">本地访问令牌（可选）</label>
+        <input id="token" type="text" placeholder="留空则不校验；设置后客户端 apiKey 需填同一值">
+        <span class="hint" style="margin:0">仅限制本机其他进程调用网关，不是上游密钥</span>
+      </div>
+      <p class="hint" style="margin:10px 0 0">生成的条目可追加到 WorkBuddy 的 models.json；Trae 等客户端把请求地址指向网关、模型 ID 填本地 ID 即可。路径、片段和服务商信息会自动记住；写入前生成 .bak 备份并保留原有条目，完成后在按钮下方和弹窗显示结果，无需反复点击。数组与含 models/availableModels 的对象结构都支持。</p>
+    </details>
+  </section>
+
+  <details class="card help-card">
+    <summary><span class="step ghost-step">?</span>使用说明与原理</summary>
+    <ol class="steps">
+      <li>点「+ 添加服务商」新增一组，填名字、地址、API Key（本地免鉴权服务可勾选「无需密钥」），点「获取模型」自动探测该服务商的模型清单。</li>
+      <li>在该组卡片里勾选需要的模型，<strong>无需点任何添加按钮</strong>：勾中的模型立刻自动生成渠道，地址、密钥、真实模型名、本地 ID 与能力开关全部自动带出；取消勾选即自动移除。换密钥只需改卡片里那一处，整组同步生效。</li>
+      <li>卡片下方的「已生成的渠道」可逐条测试连接、编辑别名与能力开关、删除；删除派生渠道等于取消该模型的勾选。</li>
+      <li>在「导出客户端配置」点「生成」，复制条目到客户端配置文件，或填绝对路径点「备份并写入」；保持本服务运行，重启客户端即可在模型列表里看到每个模型一条独立选项。</li>
+    </ol>
+    <details class="note">
+      <summary><strong>支持哪些服务商</strong></summary>
+      <p>任何暴露 OpenAI 兼容 <code>GET /models</code> 的 API 都可以——OpenRouter、OpenCode Zen、硅基流动、DeepSeek / 智谱 / Moonshot 官方、vLLM / Ollama / LM Studio / One-API 类自建网关等。地址可填根域名、<code>/v1</code>、<code>/api/v1</code> 或完整 <code>/chat/completions</code>，会自动尝试多个常见模型列表地址；接口位置特殊时在该组「高级选项」手动填即可。纯客户端（WorkBuddy、Trae 等）不提供模型列表接口，属于「导出客户端配置」的接入对象，不是这里的服务商。</p>
+    </details>
+    <details class="note">
+      <summary><strong>为什么必须走网关</strong></summary>
+      <p>客户端把 <code>id</code> 原样作为请求体 <code>model</code> 发出，且用 <code>id</code> 做列表去重。两个渠道若都要求同一个模型名，纯改配置无法兼顾「都不重复」和「都发对名字」。网关把本地唯一 ID 改写成各渠道真实模型名，并换成对应地址与密钥，因此真实模型名可以相同也可以不同。</p>
+    </details>
+    <details class="note">
+      <summary><strong>三处名称统一</strong></summary>
+      <p>WorkBuddy 设置页显示条目的 <code>name</code>；模型下拉在 <code>name</code> 与 <code>id</code> 不同时会拼成 <code>name:id</code>，两者相同时只显示一次。因此本工具让 <code>id</code> 与 <code>name</code> 完全相同，网关页面也显示同一个名字，三处都是「服务商·模型名」。写入时按网关地址认领并替换旧 ID 的条目，不会留下重复模型；末尾的「自定义」标签是客户端自己加的。</p>
+    </details>
+    <details class="note">
+      <summary><strong>免费模型与 429</strong></summary>
+      <p>「测试连接」返回 <code>Free usage limit reached</code> / HTTP 429 时，是上游服务商的策略限制，不是网关故障。例如 OpenCode 官方文档明确写明「Free-tier chat models require OpenCode; use paid models or Go from other clients」，即免费层模型只供其自家客户端使用，第三方客户端需改用付费模型或订阅 Go。零定价模型默认已隐藏，取消「隐藏零定价模型」可查看；建议改用非零定价模型、给账户充值或换一家服务商。</p>
+    </details>
+    <details class="note">
+      <summary><strong>注意</strong></summary>
+      <p>服务必须常驻，关闭后所有渠道会连接失败；服务商信息、模型清单和密钥保存在项目目录的 <code>channels.db</code>，备份时直接复制该文件，请勿分享（内含密钥）。能力来自上游声明或名称推断，未做真实图片请求实测，建议用「测试连接」或实际发张图确认。</p>
+    </details>
+  </details>
+
+  <footer class="foot">WorkBuddy 模型中心 · 本地别名网关 · 配置与密钥保存在项目目录的 channels.db</footer>
+</main>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-mask" data-act="close-modal"></div>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-head">
+      <h3 id="modalTitle">提示</h3>
+      <button id="btnCloseModal" class="btn small">关闭</button>
+    </div>
+    <div id="modalBody" class="modal-body"></div>
+  </div>
+</div>
+<script src="/app.js?v=0.0.1"></script>
+</body>
+</html>
