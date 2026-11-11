@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
+const { egressFetch } = require('./egress');
 
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
@@ -175,7 +176,9 @@ function initSchema() {
       supports_reasoning INTEGER NOT NULL DEFAULT 0,
       enabled INTEGER NOT NULL DEFAULT 1,
       sort_order INTEGER NOT NULL DEFAULT 0,
-      provider_id TEXT NOT NULL DEFAULT ''
+      provider_id TEXT NOT NULL DEFAULT '',
+      egress_mode TEXT NOT NULL DEFAULT 'direct',
+      proxy_id TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS providers (
       id TEXT PRIMARY KEY,
@@ -188,15 +191,35 @@ function initSchema() {
       models_url TEXT NOT NULL DEFAULT '',
       models_json TEXT NOT NULL DEFAULT '[]',
       selected_json TEXT NOT NULL DEFAULT '[]',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      egress_mode TEXT NOT NULL DEFAULT 'direct',
+      proxy_id TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS proxies (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL DEFAULT '',
+      type TEXT NOT NULL DEFAULT 'http',
+      host TEXT NOT NULL DEFAULT '',
+      port INTEGER NOT NULL DEFAULT 0,
+      username TEXT NOT NULL DEFAULT '',
+      password TEXT NOT NULL DEFAULT '',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      in_pool INTEGER NOT NULL DEFAULT 1,
       sort_order INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
 
+  // 旧库补列：出口方式默认直连，已有代理默认进池，历史配置不受影响
   const cols = db.prepare('PRAGMA table_info(channels)').all().map((c) => c.name);
-  if (!cols.includes('provider_id')) {
-    db.exec("ALTER TABLE channels ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''");
-  }
+  if (!cols.includes('provider_id')) db.exec("ALTER TABLE channels ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''");
+  if (!cols.includes('egress_mode')) db.exec("ALTER TABLE channels ADD COLUMN egress_mode TEXT NOT NULL DEFAULT 'direct'");
+  if (!cols.includes('proxy_id')) db.exec("ALTER TABLE channels ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''");
+  const pcols = db.prepare('PRAGMA table_info(providers)').all().map((c) => c.name);
+  if (!pcols.includes('egress_mode')) db.exec("ALTER TABLE providers ADD COLUMN egress_mode TEXT NOT NULL DEFAULT 'direct'");
+  if (!pcols.includes('proxy_id')) db.exec("ALTER TABLE providers ADD COLUMN proxy_id TEXT NOT NULL DEFAULT ''");
+  const xcols = db.prepare('PRAGMA table_info(proxies)').all().map((c) => c.name);
+  if (!xcols.includes('in_pool')) db.exec('ALTER TABLE proxies ADD COLUMN in_pool INTEGER NOT NULL DEFAULT 1');
 
   if (legacy) {
     const rows = db.prepare('SELECT * FROM channels_legacy').all();
@@ -282,6 +305,125 @@ function migrateChannelsToProviders() {
 initSchema();
 refreshUnifiedNames();
 
+// ---- 代理池与出口选择 ----
+
+const EGRESS_MODES = ['direct', 'single', 'pool'];
+let rrCursor = 0;
+
+function normalizeMode(m) {
+  return EGRESS_MODES.includes(String(m || '')) ? String(m) : 'direct';
+}
+
+function readProxies() {
+  return db.prepare('SELECT * FROM proxies ORDER BY sort_order, id').all().map((r) => ({
+    id: r.id, label: r.label, type: r.type, host: r.host, port: r.port,
+    username: r.username, hasAuth: Boolean(r.password), password: '',
+    enabled: Boolean(r.enabled), inPool: r.in_pool !== 0,
+  }));
+}
+
+function cleanProxy(p) {
+  const id = String(p?.id || '').trim();
+  const port = Number(p?.port || 0);
+  return {
+    id: /^[A-Za-z0-9_-]{8,64}$/.test(id) ? id : randomUUID(),
+    label: String(p?.label || '').trim(),
+    type: String(p?.type) === 'socks5' ? 'socks5' : 'http',
+    host: String(p?.host || '').trim(),
+    port: port > 0 && port <= 65535 ? Math.floor(port) : 0,
+    username: String(p?.username || '').trim(),
+    password: String(p?.password || '').trim(),
+    enabled: p?.enabled !== false,
+    inPool: p?.inPool !== false,
+  };
+}
+
+function saveProxies(list) {
+  if (!Array.isArray(list)) throw new Error('代理列表格式错误');
+  const clean = list.map(cleanProxy);
+  const ids = new Set();
+  clean.forEach((x) => {
+    if (ids.has(x.id)) throw new Error('代理标识重复，请刷新页面重试');
+    ids.add(x.id);
+  });
+  const upsert = db.prepare(`INSERT INTO proxies
+    (id, label, type, host, port, username, password, enabled, in_pool, sort_order)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      label=excluded.label, type=excluded.type, host=excluded.host, port=excluded.port,
+      username=excluded.username, password=excluded.password,
+      enabled=excluded.enabled, in_pool=excluded.in_pool, sort_order=excluded.sort_order`);
+  db.exec('BEGIN');
+  try {
+    clean.forEach((x, i) => {
+      const old = db.prepare('SELECT password FROM proxies WHERE id = ?').get(x.id);
+      let secret = old ? old.password : '';
+      if (x.password === CLEAR_KEY) secret = '';
+      else if (x.password) secret = x.password;
+      upsert.run(x.id, x.label, x.type, x.host, x.port, x.username, secret,
+        Number(x.enabled), Number(x.inPool), i);
+    });
+    const keep = [...ids];
+    db.prepare('SELECT id FROM proxies').all().map((r) => r.id)
+      .filter((id) => !keep.includes(id))
+      .forEach((id) => db.prepare('DELETE FROM proxies WHERE id = ?').run(id));
+    db.exec('COMMIT');
+  } catch (err) { db.exec('ROLLBACK'); throw err; }
+  return readProxies();
+}
+
+// 代理池 = 标记为「池内」且已启用、主机端口完整的代理；轮询只在池内轮换
+function poolProxies() {
+  return db.prepare("SELECT * FROM proxies WHERE enabled = 1 AND in_pool = 1 AND host <> '' AND port > 0 ORDER BY sort_order, id").all();
+}
+
+function egressProxy(row) {
+  return {
+    id: row.id, label: row.label || `${row.type}://${row.host}:${row.port}`,
+    type: row.type, host: row.host, port: row.port,
+    username: row.username, password: row.password,
+  };
+}
+
+// 直连返回 null；单条按 id 取（不要求入池）；池模式每次请求轮换一条池内代理
+function proxyFor(mode, proxyId) {
+  const m = normalizeMode(mode);
+  if (m === 'direct') return null;
+  if (m === 'pool') {
+    const list = poolProxies();
+    if (!list.length) throw new Error('代理池为空：请在「网络代理」里把至少一条代理点成「池内」并确保已启用');
+    const p = list[rrCursor % list.length];
+    rrCursor += 1;
+    return egressProxy(p);
+  }
+  const row = db.prepare('SELECT * FROM proxies WHERE id = ? AND enabled = 1').get(String(proxyId || ''));
+  if (!row || !row.host || !row.port) throw new Error('指定的代理不存在或已禁用，请重新选择');
+  return egressProxy(row);
+}
+
+const proxyForChannel = (row) => proxyFor(row.egress_mode, row.proxy_id);
+const proxyForProvider = (p) => proxyFor(p.egressMode, p.proxyId);
+
+// 用这条代理访问回显出口 IP 的公共服务，确认代理真的连通、出口在哪
+async function testProxyEgress(id) {
+  const row = db.prepare('SELECT * FROM proxies WHERE id = ?').get(String(id || ''));
+  if (!row || !row.host || !row.port) return { ok: false, error: '代理不存在或主机/端口未填写' };
+  const proxy = egressProxy(row);
+  const target = `${proxy.type}://${proxy.host}:${proxy.port}`;
+  try {
+    const resp = await egressFetch('https://api.ipify.org?format=json', {
+      method: 'GET', signal: AbortSignal.timeout(10000),
+    }, proxy);
+    const text = await resp.text();
+    if (!resp.ok) return { ok: false, error: `出口服务返回 HTTP ${resp.status}`, target };
+    let ip = '';
+    try { ip = JSON.parse(text).ip || ''; } catch { ip = text.trim().slice(0, 60); }
+    return { ok: true, ip, target, label: proxy.label };
+  } catch (err) {
+    return { ok: false, error: `代理连接失败：${err.message}`, target };
+  }
+}
+
 // ---- 服务商读写 ----
 
 function loadProviderRow(id) {
@@ -290,8 +432,9 @@ function loadProviderRow(id) {
   return {
     id: r.id, label: r.label, url: r.url, apiKey: r.api_key,
     noAuth: Boolean(r.no_auth), prefix: r.prefix, chatUrl: r.chat_url,
-    modelsUrl: r.models_url, models: safeArray(r.models_json),
+    modelsUrl: r.models_url,     models: safeArray(r.models_json),
     selected: safeArray(r.selected_json), sortOrder: r.sort_order,
+    egressMode: normalizeMode(r.egress_mode), proxyId: r.proxy_id || '',
   };
 }
 
@@ -308,6 +451,7 @@ function readProviders() {
     keyHint: r.no_auth ? '无需密钥' : maskKey(r.api_key),
     models: safeArray(r.models_json),
     selected: safeArray(r.selected_json),
+    egressMode: normalizeMode(r.egress_mode), proxyId: r.proxy_id || '',
     channelCount: db.prepare('SELECT COUNT(*) AS n FROM channels WHERE provider_id = ?').get(r.id).n,
   }));
 }
@@ -330,6 +474,7 @@ function readChannels() {
       supportsImages: Boolean(r.supports_images),
       supportsReasoning: Boolean(r.supports_reasoning),
       enabled: Boolean(r.enabled),
+      egressMode: normalizeMode(r.egress_mode), proxyId: r.proxy_id || '',
       noAuth: na,
       hasKey: !na && isRealKey(r.api_key),
       keyHint: na ? '无需密钥' : maskKey(r.api_key),
@@ -348,6 +493,8 @@ function syncProvider(p) {
   const label = String(p.label || '').trim() || '服务商';
   const prefix = String(p.prefix || '').trim() || prefixFrom(label, p.url, '');
   const key = p.noAuth ? NO_AUTH_KEY : String(p.apiKey || '');
+  const mode = normalizeMode(p.egressMode);
+  const proxyId = mode === 'single' ? String(p.proxyId || '') : '';
 
   // 取消勾选：删掉本分组下不再需要的渠道
   existing.forEach((r) => {
@@ -360,16 +507,16 @@ function syncProvider(p) {
   const usedAlias = new Set(all.map((r) => r.alias));
   const usedLocal = new Set(all.map((r) => r.local_id));
   const insert = db.prepare(`INSERT INTO channels
-    (id, alias, label, url, api_key, upstream_model, local_id, supports_tool_call, supports_images, supports_reasoning, enabled, sort_order, provider_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    (id, alias, label, url, api_key, upstream_model, local_id, supports_tool_call, supports_images, supports_reasoning, enabled, sort_order, provider_id, egress_mode, proxy_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   let order = db.prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS n FROM channels').get().n;
 
   selected.forEach((model) => {
     const row = byModel.get(model);
     if (row) {
       // 共用字段每次保存都覆盖；别名、能力开关等用户改动保留，统一名称在末尾刷新
-      db.prepare('UPDATE channels SET url = ?, api_key = ? WHERE id = ?')
-        .run(chatUrl, key, row.id);
+      db.prepare('UPDATE channels SET url = ?, api_key = ?, egress_mode = ?, proxy_id = ? WHERE id = ?')
+        .run(chatUrl, key, mode, proxyId, row.id);
       return;
     }
     const alias = pickUnique(slug(`${prefix}-${model}`), usedAlias, 32);
@@ -377,7 +524,7 @@ function syncProvider(p) {
     const cap = modelMap.get(model)?.capabilities || {};
     insert.run(randomUUID(), alias, `${label}·${shortModel(model)}`, chatUrl, key, model, localId,
       Number(cap.supportsToolCall !== false), Number(Boolean(cap.supportsImages)),
-      Number(Boolean(cap.supportsReasoning)), 1, order, p.id);
+      Number(Boolean(cap.supportsReasoning)), 1, order, p.id, mode, proxyId);
     usedLocal.add(localId);
     usedAlias.add(alias);
     order += 1;
@@ -399,6 +546,8 @@ function cleanProvider(p) {
     noAuth: Boolean(p.noAuth),
     apiKey: String(p.apiKey || '').trim(),
     selected,
+    egressMode: normalizeMode(p.egressMode),
+    proxyId: normalizeMode(p.egressMode) === 'single' ? String(p.proxyId || '').trim() : '',
   };
 }
 
@@ -411,13 +560,14 @@ function saveProviders(list, token) {
     ids.add(p.id);
   });
   const upsert = db.prepare(`INSERT INTO providers
-    (id, label, url, api_key, no_auth, prefix, chat_url, models_url, models_json, selected_json, sort_order)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)
+    (id, label, url, api_key, no_auth, prefix, chat_url, models_url, models_json, selected_json, sort_order, egress_mode, proxy_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       label=excluded.label, url=excluded.url, api_key=excluded.api_key,
       no_auth=excluded.no_auth, prefix=excluded.prefix, chat_url=excluded.chat_url,
       models_url=excluded.models_url, selected_json=excluded.selected_json,
-      sort_order=excluded.sort_order`);
+      sort_order=excluded.sort_order, egress_mode=excluded.egress_mode,
+      proxy_id=excluded.proxy_id`);
   db.exec('BEGIN');
   try {
     clean.forEach((p, i) => {
@@ -428,7 +578,7 @@ function saveProviders(list, token) {
       else key = old ? old.api_key : '';
       if (p.noAuth) key = NO_AUTH_KEY;
       upsert.run(p.id, p.label, p.url, key, Number(p.noAuth), p.prefix,
-        p.chatUrl, p.modelsUrl, JSON.stringify(p.selected), i);
+        p.chatUrl, p.modelsUrl, JSON.stringify(p.selected), i, p.egressMode, p.proxyId);
     });
     // 删除前端已移除的分组及其渠道
     const keep = [...ids];
@@ -499,10 +649,10 @@ function parseErrorDetail(text) {
   return detail;
 }
 
-async function fetchModelList(url, key, noAuth) {
+async function fetchModelList(url, key, noAuth, proxy) {
   const headers = { accept: 'application/json' };
   if (!noAuth && isRealKey(key)) headers.authorization = `Bearer ${key}`;
-  const resp = await fetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(12000) });
+  const resp = await egressFetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(12000) }, proxy);
   const text = await resp.text();
   if (!resp.ok) return { ok: false, status: resp.status, detail: parseErrorDetail(text) };
   let payload;
@@ -632,8 +782,9 @@ async function discoverForProvider(id) {
   const chatUrl = p.chatUrl || normalizeChatUrl(p.url);
   const prefix = p.prefix || prefixFrom(p.label, p.url, '');
   const candidates = modelUrlCandidates(p.url, p.modelsUrl);
+  const egress = proxyForProvider(p);
   const results = await Promise.all(candidates.map(async (u) => {
-    try { return { url: u, ...(await fetchModelList(u, p.apiKey, p.noAuth)) }; }
+    try { return { url: u, ...(await fetchModelList(u, p.apiKey, p.noAuth, egress)) }; }
     catch (err) { return { url: u, ok: false, detail: err.message }; }
   }));
   const hit = results.find((r) => r.ok && r.rawList.length);
@@ -690,11 +841,16 @@ function patchChannel(body) {
     if (body.noAuth) key = NO_AUTH_KEY;
   }
   const num = (v, old) => (v === undefined ? old : Number(Boolean(v)));
+  // 服务商派生的渠道跟随分组出口，独立渠道可单独指定
+  const mode = derived ? normalizeMode(row.egress_mode) : normalizeMode(body.egressMode ?? row.egress_mode);
+  const proxyId = derived ? (row.proxy_id || '')
+    : (mode === 'single' ? String(body.proxyId ?? row.proxy_id ?? '') : '');
   db.prepare(`UPDATE channels SET alias=?, label=?, local_id=?, url=?, upstream_model=?, api_key=?,
-    supports_tool_call=?, supports_images=?, supports_reasoning=?, enabled=? WHERE id=?`)
+    supports_tool_call=?, supports_images=?, supports_reasoning=?, enabled=?, egress_mode=?, proxy_id=? WHERE id=?`)
     .run(alias, String(body.label ?? row.label).trim() || alias, localId, url, model, key,
       num(body.supportsToolCall, row.supports_tool_call), num(body.supportsImages, row.supports_images),
-      num(body.supportsReasoning, row.supports_reasoning), num(body.enabled, row.enabled), id);
+      num(body.supportsReasoning, row.supports_reasoning), num(body.enabled, row.enabled),
+      mode, proxyId, id);
   refreshUnifiedNames();
   return { ok: true };
 }
@@ -727,11 +883,13 @@ function addManualChannel(body) {
   const localId = String(body.localId || '').trim() || defaultLocalId(alias, model);
   if (db.prepare('SELECT id FROM channels WHERE local_id = ?').get(localId)) throw new Error(`本地模型 ID 重复：${localId}`);
   const id = randomUUID();
+  const mode = normalizeMode(body.egressMode);
+  const proxyId = mode === 'single' ? String(body.proxyId || '') : '';
   db.prepare(`INSERT INTO channels
-    (id, alias, label, url, api_key, upstream_model, local_id, supports_tool_call, supports_images, supports_reasoning, enabled, sort_order, provider_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')`)
+    (id, alias, label, url, api_key, upstream_model, local_id, supports_tool_call, supports_images, supports_reasoning, enabled, sort_order, provider_id, egress_mode, proxy_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`)
     .run(id, alias, String(body.label || '').trim() || '自定义渠道', String(body.url || '').trim(),
-      String(body.apiKey || '').trim(), model, localId, 1, 0, 0, 1, n);
+      String(body.apiKey || '').trim(), model, localId, 1, 0, 0, 1, n, mode, proxyId);
   refreshUnifiedNames();
   return { ok: true, id };
 }
@@ -821,7 +979,8 @@ async function testChannel(key) {
   if (!isRealKey(row.api_key)) return { ok: false, message: '未填写 API Key' };
   if (!row.url || !row.upstream_model) return { ok: false, message: '接口地址或真实模型名为空' };
   try {
-    const resp = await fetch(row.url, {
+    const egress = proxyForChannel(row);
+    const resp = await egressFetch(row.url, {
       method: 'POST',
       headers: upstreamHeaders(row),
       body: JSON.stringify({
@@ -830,7 +989,7 @@ async function testChannel(key) {
         max_tokens: 8,
         stream: false,
       }),
-    });
+    }, egress);
     const text = await resp.text();
     let detail = text.slice(0, 300);
     try {
@@ -838,13 +997,24 @@ async function testChannel(key) {
       if (parsed.choices && parsed.choices[0]) detail = `返回模型 ${parsed.model || row.upstream_model}`;
       else if (parsed.error) detail = String(parsed.error.message || JSON.stringify(parsed.error)).slice(0, 300);
     } catch { /* 非 JSON 响应保留原文 */ }
-    return { ok: resp.ok, status: resp.status, message: detail };
+    return { ok: resp.ok, status: resp.status, message: detail, egress: egress ? egress.label : '直连' };
   } catch (err) {
     return { ok: false, message: '请求失败: ' + err.message };
   }
 }
 
-// 把生成的条目合并进用户指定的 models.json，先备份，保留原有条目
+// 判断条目是否指向本网关生成的地址（兼容端口、HOST 与别名变化）
+function isGatewayUrl(rawUrl) {
+  if (typeof rawUrl !== 'string') return false;
+  try {
+    const u = new URL(rawUrl);
+    if (!/^\/[^/]+\/v1\/chat\/completions\/?$/.test(u.pathname)) return false;
+    const h = u.hostname.replace(/^\[|\]$/g, '');
+    return ['127.0.0.1', 'localhost', '::1', '0.0.0.0', HOST].includes(h);
+  } catch { return false; }
+}
+
+// 以当前启用渠道为准同步写入：增改删本工具管理的条目，用户自建条目保持不变
 function applyModelsFile(target) {
   const targetStr = String(target || '').trim();
   if (!path.isAbsolute(targetStr)) throw new Error('请填写绝对路径');
@@ -854,7 +1024,6 @@ function applyModelsFile(target) {
   let data;
   try { data = JSON.parse(raw); } catch { throw new Error('目标文件不是合法 JSON'); }
   const entries = buildEntries();
-  if (!entries.length) throw new Error('没有已启用的渠道，请先添加渠道');
 
   const now = new Date();
   const base = file + '.bak-' + localStamp(now);
@@ -864,20 +1033,30 @@ function applyModelsFile(target) {
   while (fs.existsSync(backup)) { backup = `${base}-${n}`; n += 1; }
   fs.writeFileSync(backup, raw, 'utf8');
 
-  let added = 0;
-  let updated = 0;
-  let replaced = 0;
   const entryIds = new Set(entries.map((e) => e.id));
   const entryUrls = new Set(entries.map((e) => e.url));
-  const staleIds = new Set();
+  // 本工具管理过的旧 id：上次写入快照 + 目标文件里所有指向本网关的条目
+  const managedIds = new Set();
+  const lastEntries = safeJson(getSetting('last_entries', ''), []);
+  if (Array.isArray(lastEntries)) {
+    lastEntries.forEach((e) => { if (e && e.id) managedIds.add(e.id); });
+  }
+  const existing = Array.isArray(data) ? data : (data && Array.isArray(data.models) ? data.models : []);
+  existing.forEach((x) => { if (x && x.id && isGatewayUrl(x.url)) managedIds.add(x.id); });
+  // 取消勾选、禁用或改名后不再生成的条目，写入时一并移除
+  const removedIds = new Set([...managedIds].filter((id) => !entryIds.has(id)));
+
+  let added = 0;
+  let updated = 0;
+  let removed = 0;
+  let replaced = 0;
   const merge = (arr) => {
-    // 名称改版后 id 会变：按同一个网关地址认领旧条目并删掉，避免列表出现重复模型
     const keep = arr.filter((x) => {
-      if (!x || !entryUrls.has(x.url) || entryIds.has(x.id)) return true;
-      staleIds.add(x.id);
+      if (!x || !removedIds.has(x.id)) return true;
+      removed += 1;
+      if (entryUrls.has(x.url)) replaced += 1; // 同一网关地址换成了新的显示名
       return false;
     });
-    replaced += arr.length - keep.length;
     arr.splice(0, arr.length, ...keep);
     entries.forEach((e) => {
       const idx = arr.findIndex((x) => x && x.id === e.id);
@@ -889,7 +1068,7 @@ function applyModelsFile(target) {
   } else if (data && Array.isArray(data.models)) {
     merge(data.models);
     if (Array.isArray(data.availableModels)) {
-      data.availableModels = data.availableModels.filter((id) => !staleIds.has(id));
+      data.availableModels = data.availableModels.filter((id) => !removedIds.has(id));
       entries.forEach((e) => { if (!data.availableModels.includes(e.id)) data.availableModels.push(e.id); });
     }
   } else {
@@ -906,7 +1085,7 @@ function applyModelsFile(target) {
   }
   return {
     backup, backupName: path.basename(backup), file, at: localTime(now),
-    added, updated, replaced, total: entries.length,
+    added, updated, replaced, removed, total: entries.length,
     format: Array.isArray(data) ? 'array' : 'object',
   };
 }
@@ -915,7 +1094,7 @@ async function handleApi(req, res, pathname) {
   const method = req.method;
   if (pathname === '/api/state' && method === 'GET') {
     return json(res, 200, {
-      providers: readProviders(), channels: readChannels(),
+      providers: readProviders(), channels: readChannels(), proxies: readProxies(),
       token: getSetting('proxy_token', ''), nameTemplate: nameTemplate(), port: PORT,
       targetPath: getSetting('target_path', ''), lastEntries: getSetting('last_entries', ''),
       lastApply: safeJson(getSetting('last_apply', ''), null),
@@ -943,6 +1122,14 @@ async function handleApi(req, res, pathname) {
     const body = JSON.parse(await readBody(req));
     const ids = saveProviders(body.providers, body.token);
     return json(res, 200, { ok: true, ids, providers: readProviders(), channels: readChannels() });
+  }
+  if (pathname === '/api/proxies' && method === 'PUT') {
+    const body = JSON.parse(await readBody(req));
+    return json(res, 200, { ok: true, proxies: saveProxies(body.proxies) });
+  }
+  if (pathname === '/api/proxy-test' && method === 'POST') {
+    const body = JSON.parse(await readBody(req));
+    return json(res, 200, await testProxyEgress(body.id));
   }
   if (pathname === '/api/discover' && method === 'POST') {
     const body = JSON.parse(await readBody(req));
@@ -980,7 +1167,7 @@ async function handleApi(req, res, pathname) {
     const lastApply = {
       at: result.at, file: result.file, backupName: result.backupName,
       added: result.added, updated: result.updated, replaced: result.replaced,
-      total: result.total, format: result.format,
+      removed: result.removed, total: result.total, format: result.format,
     };
     setSetting('last_apply', JSON.stringify(lastApply));
     return json(res, 200, { ok: true, ...result, lastApply });
@@ -1015,11 +1202,19 @@ async function proxy(req, res, pathname) {
   if (req.headers['http-referer']) headers['http-referer'] = req.headers['http-referer'];
   if (req.headers['x-title']) headers['x-title'] = req.headers['x-title'];
 
-  const upstream = await fetch(row.url, { method: 'POST', headers, body: JSON.stringify(body) });
+  let egress;
+  let upstream;
+  try {
+    egress = proxyForChannel(row);
+    upstream = await egressFetch(row.url, { method: 'POST', headers, body: JSON.stringify(body) }, egress);
+  } catch (err) {
+    return json(res, 502, { error: { message: `上游请求失败：${err.message}`, type: 'proxy_error' } });
+  }
   res.writeHead(upstream.status, {
     'content-type': upstream.headers.get('content-type') || 'application/json',
     'x-upstream': row.alias,
     'x-upstream-model': row.upstream_model,
+    'x-egress': egress ? `${egress.type}://${egress.host}:${egress.port}` : 'direct',
   });
   if (upstream.body) {
     for await (const chunk of upstream.body) {

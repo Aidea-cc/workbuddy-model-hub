@@ -600,3 +600,172 @@ code { background: #eaeefb; color: #2f4ec9; }
   .stat-value.good { font-size: 15px; }
   .status { align-self: flex-start; }
 }
+
+/* 顶部 GitHub 仓库入口 */
+.repo-link {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px;
+  border-radius: 999px; border: 1px solid rgba(255, 255, 255, .28);
+  background: rgba(255, 255, 255, .1); color: #eaf0ff;
+  font-size: 11.5px; font-weight: 500; line-height: 1.2;
+  text-decoration: none; white-space: nowrap; z-index: 1;
+}
+.repo-link:hover, .repo-link:focus-visible { background: rgba(255, 255, 255, .22); }
+.repo-link span { font-size: 12px; opacity: .8; }
+@media (max-width: 720px) {
+  .repo-link { font-size: 11px; padding: 5px 9px; }
+}
+
+/* 服务商卡片：网络出口常显，避免加了代理却没应用 */
+.egress-bar {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px 14px; margin-top: 12px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 8px; background: #f8fbff;
+}
+.egress-bar .hint { grid-column: 1 / -1; margin: 0; }
+.egress-badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--line); background: #fff; color: var(--muted); white-space: nowrap;
+}
+.egress-badge.proxy { color: var(--ok); border-color: #9fe1cb; background: #e1f5ee; }
+.egress-badge.warn { color: var(--warn); border-color: #f2cf9a; background: #fff5e4; }
+
+/* 网络代理池：每条代理独立折叠 */
+.proxy-list { display: grid; gap: 10px; margin: 12px 0; }
+.proxy-row { border: 1px solid var(--line); border-radius: 10px; background: #fff; overflow: hidden; }
+.proxy-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; cursor: pointer; list-style: none; }
+.proxy-summary::-webkit-details-marker { display: none; }
+.proxy-summary:hover { background: #f8fbff; }
+.proxy-row[open] > .proxy-summary { border-bottom: 1px solid var(--line); background: #f7faff; }
+.proxy-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.proxy-addr { font-size: 11px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+.proxy-tag { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; }
+.proxy-tag.on, .proxy-tag.used { color: var(--ok); border-color: #9fe1cb; background: #e1f5ee; }
+.proxy-tag.off { color: var(--muted); }
+.proxy-tag.warn { color: var(--warn); border-color: #f2cf9a; background: #fff5e4; }
+.proxy-caret { margin-left: auto; color: var(--muted); font-size: 12px; transition: transform .15s; }
+.proxy-row[open] .proxy-caret { transform: rotate(180deg); }
+.proxy-body { padding: 12px; }
+.proxy-row-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.proxy-row-head .hint { flex: 1; }
+.proxy-row-head .danger { margin-left: auto; }
+.proxy-index {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%; flex: none;
+  background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 600;
+}
+.proxy-row-head .inline-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.proxy-row-head .inline-check input { accent-color: var(--accent); }
+.proxy-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+.proxy-apply {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line);
+}
+.proxy-apply .hint { margin: 0; }
+.proxy-apply [data-role="proxy-used"], .proxy-apply [data-role="proxy-test"] { flex: 1 1 100%; }
+.proxy-apply .hint.ok { color: var(--ok); }
+.proxy-apply .hint.err { color: var(--warn); }
+.proxy-apply select {
+  border: 1px solid var(--line); border-radius: 7px; padding: 5px 9px;
+  font-size: 12px; color: var(--text); background: var(--surface); max-width: 220px;
+}
+.proxy-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.proxy-actions .msg { flex: 1; min-width: 160px; }
+@media (max-width: 900px) {
+  .proxy-fields { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .egress-bar { grid-template-columns: 1fr; }
+  .proxy-addr { flex: 1 1 100%; }
+  .proxy-apply select { max-width: 100%; flex: 1 1 140px; }
+}
+@media (max-width: 480px) {
+  .proxy-body { padding: 10px; }
+  .proxy-row-head .danger { margin-left: 0; }
+}
+
+/* 窄屏横幅：状态徽章与仓库链接并列，空间不足时省略文字而不被裁切 */
+@media (max-width: 720px) {
+  .top::after { display: none; }
+  .hero-side { gap: 8px; }
+  .repo-link { flex: none; }
+  .status { flex: 0 1 auto; min-width: 0; max-width: 58%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+/* ===== 整行点击：所有折叠标题统一铺满整行并显示指示 ===== */
+.row-toggle > summary {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  list-style: none; cursor: pointer; min-height: 40px;
+  padding: 8px 12px; border-radius: 9px;
+  transition: background .15s ease;
+}
+.row-toggle > summary::-webkit-details-marker { display: none; }
+.row-toggle > summary::after {
+  content: '\25B8'; margin-left: auto; flex: none;
+  color: var(--muted); font-size: 12px; line-height: 1;
+}
+.row-toggle[open] > summary::after { content: '\25BE'; }
+.row-toggle > summary:hover { background: var(--accent-soft); }
+/* 旧版左侧箭头与 note 的 + 号让位给统一的行尾指示 */
+.fold.row-toggle > summary::before,
+.intro.row-toggle > summary::before { content: none; }
+details.note.row-toggle > summary::after { content: '\25B8'; float: none; margin-left: auto; }
+details.note.row-toggle[open] > summary::after { content: '\25BE'; }
+.advanced.row-toggle > summary { padding: 4px 6px; }
+.intro.row-toggle > summary { padding: 4px 8px; }
+
+/* 服务商卡片：整行可折叠 */
+.provider-head { cursor: pointer; transition: background .15s ease; }
+.provider-head:hover { background: linear-gradient(90deg, #e8efff, #f7faff); }
+.provider-card.collapsed .provider-head { border-bottom-color: transparent; }
+
+/* 渠道行：整行展开编辑 / 收起 */
+.channel.compact .compact-row, .channel:not(.compact) .channel-head { cursor: pointer; }
+.channel.compact .compact-row:hover .compact-name,
+.channel:not(.compact) .channel-head:hover .channel-title { color: var(--accent); }
+.channel:not(.compact) .channel-head::after { content: '\25B4'; color: var(--muted); font-size: 13px; }
+
+/* 可用模型：勾选框独立，点击整行展开详情 */
+.disc-list .model-item { border-bottom: 1px solid var(--line); }
+.disc-list .model-item:last-child { border-bottom: 0; }
+.disc-list .model-row { border-bottom: 0; }
+.model-row {
+  display: grid; grid-template-columns: 24px minmax(0, 1.2fr) minmax(0, 1.5fr) auto 16px;
+  gap: 10px; align-items: center; padding: 9px 13px;
+  font-size: 12px; cursor: pointer;
+}
+.model-row:hover { background: #f5f8ff; }
+.model-item.picked .model-row { background: #eef2ff; box-shadow: inset 3px 0 0 var(--accent); }
+.model-item.picked .model-row:hover { background: #e6ecff; }
+.model-check { display: flex; align-items: center; justify-content: center; min-height: 26px; cursor: pointer; }
+.model-check input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+.model-caret { color: var(--muted); font-size: 12px; text-align: center; }
+.model-detail { padding: 10px 14px 12px; background: #f8faff; border-top: 1px dashed var(--line); }
+.model-detail .kv { grid-template-columns: 92px minmax(0, 1fr); padding: 4px 0; }
+.model-detail .kv:first-child { border-top: 0; }
+
+/* 代理池概览与池内标签 */
+.pool-summary {
+  display: grid; gap: 6px; padding: 12px 14px; margin: 0 0 12px;
+  border: 1px solid #dce5fb; border-radius: 10px; background: #f5f8ff;
+}
+.pool-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pool-title { font-size: 13px; font-weight: 650; color: var(--accent); }
+.pool-summary .hint { font-size: 12px; }
+button.proxy-tag.pool-tag {
+  font: inherit; font-size: 11px; line-height: 1.5; padding: 2px 8px;
+  border-radius: 999px; border: 1px solid var(--line); background: #fff;
+  white-space: nowrap; cursor: pointer;
+}
+button.proxy-tag.pool-tag:hover { box-shadow: 0 0 0 2px var(--accent-soft); }
+button.proxy-tag.pool-tag.on { color: var(--ok); border-color: #9fe1cb; background: #e8f8f1; }
+button.proxy-tag.pool-tag.off { color: var(--muted); }
+
+@media (max-width: 900px) {
+  .model-row { grid-template-columns: 24px minmax(0, 1fr) 16px; }
+  .model-caps, .model-meta { grid-column: 2; }
+  .model-caret { grid-column: 3; grid-row: 1; }
+}
+@media (max-width: 720px) {
+  .model-detail .kv { grid-template-columns: 1fr; gap: 2px; }
+  .row-toggle > summary { min-height: 42px; }
+}

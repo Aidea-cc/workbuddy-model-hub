@@ -3,7 +3,7 @@
 const $ = (s) => document.querySelector(s);
 const CLEAR_KEY = '__CLEAR_KEY__';
 
-let state = { providers: [], channels: [], token: '', port: 8787 };
+let state = { providers: [], channels: [], proxies: [], token: '', port: 8787, proxyOpen: new Set() };
 let ui = {}; // providerId -> 该组界面状态（筛选、展开、提示）
 let entriesText = '';
 let saveTimer = null;
@@ -49,7 +49,7 @@ function setApplyResult(text, type = '') {
 
 function lastApplySummary(a) {
   if (!a) return '尚未写入过；填入路径点「备份并写入」后会记住路径与结果';
-  return `上次写入 ${a.at}（本机时间）· 新增 ${a.added} / 更新 ${a.updated}${a.replaced ? ` / 替换旧名称 ${a.replaced}` : ''} · 备份 ${a.backupName}`;
+  return `上次写入 ${a.at}（本机时间）· 新增 ${a.added} / 更新 ${a.updated} / 移除 ${a.removed || 0}${a.replaced ? ` / 替换旧名称 ${a.replaced}` : ''} · 备份 ${a.backupName}`;
 }
 
 function setStatus(on, count = 0) {
@@ -83,6 +83,7 @@ function uiFor(id) {
       search: '', chatOnly: true, hideFree: true, imageOnly: false,
       editCid: '', meta: '', syncMsg: '', syncType: '',
       openCard: true, openModels: false, openChannels: false,
+      detailModels: new Set(),
     };
   }
   return ui[id];
@@ -109,6 +110,7 @@ function providerHtml(p, idx) {
         <button class="fold-btn" data-act="toggle-card" title="展开或收起整组">${u.openCard ? '▾' : '▸'}</button>
         <span class="provider-title">${esc(p.label || '未命名')}</span>
         <span class="provider-sub" data-role="sub"></span>
+        <span class="egress-badge ${egressBadge(p).cls}" data-role="egress">${esc(egressBadge(p).text)}</span>
       </div>
       <div class="actions">
         <button class="btn small" data-act="toggle-card">${u.openCard ? '收起' : '展开'}</button>
@@ -122,12 +124,17 @@ function providerHtml(p, idx) {
         <div class="field"><label>${esc(keyLabel)}</label><input type="password" data-field="apiKey" value="" placeholder="${esc(keyPlaceholder)}" ${p.noAuth ? 'disabled' : ''}></div>
         <div class="field"><label>本地 / 免鉴权服务</label><label class="inline-check"><input type="checkbox" data-field="noAuth" ${p.noAuth ? 'checked' : ''}>无需密钥</label></div>
       </div>
+      <div class="egress-bar">
+        <div class="field"><label>网络出口</label><select data-field="egressMode">${egressOptionsHtml(p.egressMode)}</select></div>
+        <div class="field"><label>指定代理</label><select data-field="proxyId" ${p.egressMode === 'single' ? '' : 'disabled'}>${proxyOptionsHtml(p.proxyId)}</select></div>
+        <span class="hint">该组所有模型共用此出口；添加代理后必须在这里选择才会生效，也可在「网络代理」里一键应用。</span>
+      </div>
       <div class="provider-actions">
         <button class="btn primary small" data-act="discover">获取模型</button>
         <span class="provider-meta" data-role="meta">${esc(u.meta)}</span>
       </div>
-      <details class="advanced">
-        <summary>高级选项（自动推导失败时才需要）</summary>
+      <details class="advanced row-toggle">
+        <summary>高级选项（自动推导 · 密钥）</summary>
         <div class="discover-grid adv-grid">
           <div class="field"><label>别名前缀 / 本地 ID 前缀</label><input type="text" data-field="prefix" value="${esc(p.prefix)}" placeholder="按服务商名字自动生成"></div>
           <div class="field"><label>对话地址（自动推导，可覆盖）</label><input type="text" data-field="chatUrl" value="${esc(p.chatUrl)}" placeholder="留空自动推导"></div>
@@ -137,10 +144,10 @@ function providerHtml(p, idx) {
         <div class="adv-actions"><button class="btn small danger" data-act="clear-key">清除密钥</button></div>
       </details>
 
-      <details class="fold" data-fold="models" ${u.openModels ? 'open' : ''}>
+      <details class="fold row-toggle" data-fold="models" ${u.openModels ? 'open' : ''}>
         <summary>可用模型 <span class="fold-note" data-role="model-count"></span></summary>
         <div class="fold-body">
-          <p class="hint" style="margin:0 0 10px">勾选即自动生成渠道，取消勾选即移除。</p>
+          <p class="hint" style="margin:0 0 10px">点前面的勾选框启用模型（自动生成渠道，取消勾选即移除）；点模型行整行可展开 / 收起该模型的能力来源与说明。</p>
           <div class="disc-tools">
             <input type="text" data-filter="search" placeholder="搜索模型 ID 或名称" value="${esc(u.search)}">
             <label><input type="checkbox" data-filter="chatOnly" ${u.chatOnly ? 'checked' : ''}>仅对话模型</label>
@@ -154,9 +161,10 @@ function providerHtml(p, idx) {
         </div>
       </details>
 
-      <details class="fold" data-fold="channels" ${u.openChannels ? 'open' : ''}>
+      <details class="fold row-toggle" data-fold="channels" ${u.openChannels ? 'open' : ''}>
         <summary>已生成的渠道 <span class="fold-note" data-role="channel-count"></span></summary>
         <div class="fold-body">
+          <p class="hint" style="margin:0 0 10px">点渠道整行展开编辑，再点展开后的标题行即可收起。</p>
           <div class="channels" data-role="channels"></div>
         </div>
       </details>
@@ -185,25 +193,48 @@ function visibleModels(p) {
     && (!u.imageOnly || m.capabilities.supportsImages));
 }
 
+// 整行展开的模型详情：把原本只能靠悬停 title 看到的信息铺开，移动端也能读
+function modelDetailHtml(m) {
+  const cap = m.capabilities || {};
+  const src = m.sources || {};
+  const origin = (k) => (src[k] === 'api' ? '上游接口声明' : '按名称推断');
+  const rows = [
+    ['上游名称', m.name || m.id],
+    ['接口协议', m.protocol && m.protocol !== 'unknown' ? m.protocol : '未声明'],
+    ['上下文长度', m.context ? `${Math.round(m.context / 1000)}K tokens` : '未声明'],
+    ['图片输入', `${cap.supportsImages ? '支持' : '未支持'} · ${origin('images')}`],
+    ['工具调用', `${cap.supportsToolCall ? '支持' : '未支持'} · ${origin('toolCall')}`],
+    ['推理模式', `${cap.supportsReasoning ? '支持' : '未支持'} · ${origin('reasoning')}`],
+    ['零定价', m.free ? '是 · 部分服务商限制为仅自家客户端可用' : '否'],
+  ].map(([k, v]) => `<div class="kv"><span>${esc(k)}</span><code>${esc(v)}</code></div>`).join('');
+  return `<div class="model-detail">${rows}${m.description
+    ? `<p class="hint" style="margin:8px 0 0">${esc(m.description)}</p>` : ''}</div>`;
+}
+
 function modelRowHtml(p, m) {
   const picked = (p.selected || []).includes(m.id);
   const cap = m.capabilities || {};
+  const open = uiFor(p.id).detailModels.has(m.id);
   const badge = (on, text, src) => `<span class="cap ${on ? 'yes' : ''}" title="来源：${src === 'api' ? '上游接口声明' : '按名称推断'}">${on ? '✓' : '–'} ${text}${src === 'inferred' ? ' *' : ''}</span>`;
   const meta = [
     m.context ? Math.round(m.context / 1000) + 'K' : '',
     m.protocol && !['chat-completions', 'unknown'].includes(m.protocol) ? esc(m.protocol) : '',
   ].filter(Boolean).join(' · ');
-  return `<label class="model-row ${picked ? 'picked' : ''}">
-    <input type="checkbox" data-model="${esc(m.id)}" ${picked ? 'checked' : ''}>
-    <span class="model-id" title="${esc(m.name)}${m.description ? ' — ' + esc(m.description) : ''}">${esc(m.id)}</span>
-    <span class="model-caps">
-      ${badge(cap.supportsImages, '图片', m.sources?.images)}
-      ${badge(cap.supportsToolCall, '工具', m.sources?.toolCall)}
-      ${badge(cap.supportsReasoning, '推理', m.sources?.reasoning)}
-      ${m.free ? '<span class="cap free" title="上游标价为 0；部分服务商限制为仅自家客户端可用">零定价 · 可能被限</span>' : ''}
-    </span>
-    <span class="model-meta">${meta}</span>
-  </label>`;
+  return `<div class="model-item ${picked ? 'picked' : ''}" data-model-item="${esc(m.id)}">
+    <div class="model-row" data-model-id="${esc(m.id)}" title="点击展开 / 收起模型详情">
+      <label class="model-check" title="勾选启用该模型"><input type="checkbox" data-model="${esc(m.id)}" ${picked ? 'checked' : ''}></label>
+      <span class="model-id">${esc(m.id)}</span>
+      <span class="model-caps">
+        ${badge(cap.supportsImages, '图片', m.sources?.images)}
+        ${badge(cap.supportsToolCall, '工具', m.sources?.toolCall)}
+        ${badge(cap.supportsReasoning, '推理', m.sources?.reasoning)}
+        ${m.free ? '<span class="cap free" title="上游标价为 0；部分服务商限制为仅自家客户端可用">零定价 · 可能被限</span>' : ''}
+      </span>
+      <span class="model-meta">${meta}</span>
+      <span class="model-caret" aria-hidden="true">${open ? '▴' : '▾'}</span>
+    </div>
+    ${open ? modelDetailHtml(m) : ''}
+  </div>`;
 }
 
 function renderModelList(p, card, withRows = true) {
@@ -288,6 +319,10 @@ function channelFullHtml(c, derived) {
       <div class="field"><label>统一名称（显示名 = 模型 ID，自动生成）</label><input type="text" data-ch-field="label" value="${esc(c.displayName || c.label)}" readonly></div>
       ${modelReadonly}
       ${extraFields}
+      ${derived
+        ? `<div class="field"><label>网络出口（跟随服务商组）</label><input type="text" value="${esc(egressLabel(c))}" readonly></div>`
+        : `<div class="field"><label>网络出口</label><select data-ch-field="egressMode">${egressOptionsHtml(c.egressMode)}</select></div>
+           <div class="field"><label>指定代理</label><select data-ch-field="proxyId" ${c.egressMode === 'single' ? '' : 'disabled'}>${proxyOptionsHtml(c.proxyId)}</select></div>`}
     </div>
     <div class="checks">
       <label><input type="checkbox" data-ch-field="supportsToolCall" ${c.supportsToolCall ? 'checked' : ''}>工具调用</label>
@@ -348,6 +383,27 @@ function updateFoldAllLabel() {
   $('#btnFoldAll').textContent = anyOpen ? '全部收起' : '全部展开';
 }
 
+// 服务商头部整行与箭头按钮共用同一套折叠逻辑
+function toggleCard(card) {
+  if (!card) return;
+  const pid = card.dataset.pid;
+  const u = uiFor(pid);
+  u.openCard = !u.openCard;
+  card.querySelector('.provider-body').hidden = !u.openCard;
+  card.querySelectorAll('[data-act="toggle-card"]').forEach((b) => {
+    b.textContent = b.classList.contains('fold-btn')
+      ? (u.openCard ? '▾' : '▸') : (u.openCard ? '收起' : '展开');
+  });
+  card.classList.toggle('collapsed', !u.openCard);
+  updateFoldAllLabel();
+  if (u.openCard) renderDynamic(); // 折叠期间未生成的列表 DOM，展开时补齐
+}
+
+// 整行可点：控件本身仍走各自的逻辑，不连带折叠
+function isRowControl(target) {
+  return Boolean(target.closest('button, a, input, select, textarea, label, summary, [data-no-fold]'));
+}
+
 // details 的 toggle 事件不冒泡，用捕获阶段记下每组的展开状态
 document.addEventListener('toggle', (e) => {
   const d = e.target;
@@ -367,6 +423,265 @@ document.addEventListener('toggle', (e) => {
   }
 }, true);
 
+// ---- 网络代理池 ----
+
+let proxySaveTimer = null;
+
+// 服务商卡片头部常显当前出口，避免「加了代理却仍走直连」而不自知
+function egressBadge(p) {
+  const m = p.egressMode || 'direct';
+  if (m === 'pool') {
+    const n = poolMembers().length;
+    return { text: `代理池轮询 · ${n} 条`, cls: n ? 'proxy' : 'warn' };
+  }
+  if (m === 'single') {
+    const x = state.proxies.find((v) => v.id === p.proxyId);
+    if (!x) return { text: '代理未设置', cls: 'warn' };
+    return { text: `代理 · ${x.label || x.host}`, cls: x.enabled ? 'proxy' : 'warn' };
+  }
+  return { text: '本地直连', cls: 'direct' };
+}
+
+function updateEgressBadges() {
+  state.providers.forEach((p) => {
+    const el = document.querySelector(`.provider-card[data-pid="${p.id}"] [data-role="egress"]`);
+    if (!el) return;
+    const b = egressBadge(p);
+    el.textContent = b.text;
+    el.className = `egress-badge ${b.cls}`;
+  });
+}
+
+function proxyOptionsHtml(keepId = '') {
+  const list = state.proxies.filter((x) => (x.enabled && x.host && x.port) || x.id === keepId);
+  return '<option value="">请选择代理</option>' + list.map((x) => {
+    const name = x.label || `${x.type}://${x.host}:${x.port}`;
+    return `<option value="${esc(x.id)}">${esc(name)}（${esc(x.type)}）</option>`;
+  }).join('');
+}
+
+function egressOptionsHtml(sel) {
+  return [
+    ['direct', '本地直连（默认）'], ['single', '指定代理'], ['pool', '代理池轮询'],
+  ].map(([v, t]) => `<option value="${v}" ${sel === v ? 'selected' : ''}>${t}</option>`).join('');
+}
+
+// 代理池 = 标为池内且已启用、主机端口完整的代理；轮询只在这里面轮换
+function poolMembers() {
+  return state.proxies.filter((x) => x.inPool !== false && x.enabled && x.host && x.port);
+}
+
+function renderProxyCount() {
+  const usable = state.proxies.filter((x) => x.enabled && x.host && x.port).length;
+  const pool = poolMembers().length;
+  $('#proxyCount').textContent = state.proxies.length
+    ? `${state.proxies.length} 条 · 池内 ${pool} 条 · ${usable} 条可用` : '未添加';
+}
+
+function updatePoolSummary() {
+  const el = $('#poolSummary');
+  if (!el) return;
+  const list = poolMembers();
+  const users = state.providers.filter((p) => p.egressMode === 'pool').length;
+  const names = list.length
+    ? list.map((x) => `${x.label || x.host}:${x.port}`).join('、')
+    : '暂无（池为空时选「代理池轮询」会返回 502）';
+  el.innerHTML = `
+    <div class="pool-head">
+      <span class="pool-title">代理池</span>
+      <span class="proxy-tag ${list.length ? 'on' : 'warn'}">池内 ${list.length} 条</span>
+      <span class="hint" style="margin:0">${users} 组服务商正在轮询</span>
+    </div>
+    <div class="hint" style="margin:0"><strong>池内成员：</strong>${esc(names)}</div>
+    <div class="hint" style="margin:0"><strong>怎么加入 / 移出：</strong>点「+ 添加代理」默认即入池；点每条代理摘要上的「池内 · 移出」/「未入池 · 加入」标签即可切换。只有池内且启用的代理参与轮询；「指定代理」不受入池状态影响。</div>`;
+}
+
+// 池成员变动后刷新概览、标签、徽章与计数，不重建代理行以免打断输入
+function updatePoolUi() {
+  updatePoolSummary();
+  document.querySelectorAll('#proxyList .proxy-row').forEach((row) => {
+    const x = state.proxies.find((v) => v.id === row.dataset.proxyId);
+    if (!x) return;
+    const tag = row.querySelector('[data-role="pool-tag"]');
+    if (tag) {
+      tag.textContent = x.inPool !== false ? '池内 · 移出' : '未入池 · 加入';
+      tag.className = `proxy-tag pool-tag ${x.inPool !== false ? 'on' : 'off'}`;
+    }
+    const box = row.querySelector('[data-proxy-field="inPool"]');
+    if (box) box.checked = x.inPool !== false;
+  });
+  renderProxyCount();
+  updateEgressBadges();
+}
+
+// 哪些服务商在用这条代理，用来提示「加了代理却没应用」
+function proxyUsage(x) {
+  const names = state.providers
+    .filter((p) => p.egressMode === 'single' && p.proxyId === x.id)
+    .map((p) => p.label || p.id);
+  const pools = state.providers.filter((p) => p.egressMode === 'pool').length;
+  return { names, pools, count: names.length + pools };
+}
+
+function proxyUsageText(use) {
+  return use.count
+    ? `使用中 · ${use.names.length} 组指定${use.pools ? ` + ${use.pools} 组轮询` : ''}`
+    : '未使用';
+}
+
+function proxyRowHtml(x, idx) {
+  const use = proxyUsage(x);
+  const addr = `${x.type}://${x.host || '未填主机'}:${x.port || '?'}`;
+  const open = !x.id || state.proxyOpen.has(x.id);
+  const applyOptions = state.providers.length
+    ? state.providers.map((p) => `<option value="${esc(p.id)}">${esc(p.label || p.id)}</option>`).join('')
+    : '<option value="">请先添加服务商</option>';
+  return `
+  <details class="proxy-row" data-proxy-id="${esc(x.id)}" ${open ? 'open' : ''}>
+    <summary class="proxy-summary">
+      <span class="proxy-index">${idx + 1}</span>
+      <span class="proxy-name">${esc(x.label || '未命名代理')}</span>
+      <span class="proxy-addr">${esc(addr)}</span>
+      <span class="proxy-tag ${x.enabled ? 'on' : 'off'}">${x.enabled ? '已启用' : '已停用'}</span>
+      <button class="proxy-tag pool-tag ${x.inPool !== false ? 'on' : 'off'}" data-act="toggle-pool" data-role="pool-tag" title="点击加入 / 移出代理池">${x.inPool !== false ? '池内 · 移出' : '未入池 · 加入'}</button>
+      <span class="proxy-tag ${use.count ? 'used' : 'warn'}" data-role="proxy-usage">${esc(proxyUsageText(use))}</span>
+      <span class="proxy-caret">▾</span>
+    </summary>
+    <div class="proxy-body">
+      <div class="proxy-row-head">
+        <label class="inline-check"><input type="checkbox" data-proxy-field="enabled" ${x.enabled ? 'checked' : ''}>启用</label>
+        <label class="inline-check"><input type="checkbox" data-proxy-field="inPool" ${x.inPool !== false ? 'checked' : ''}>加入代理池</label>
+        <span class="hint" style="margin:0">${x.hasAuth ? '已设置账号密码' : '无认证'}</span>
+        <button class="btn small" data-act="test-proxy">测试出口</button>
+        <button class="btn small danger" data-act="delete-proxy">删除</button>
+      </div>
+      <div class="proxy-fields">
+        <div class="field"><label>名称</label><input type="text" data-proxy-field="label" value="${esc(x.label)}" placeholder="例如 本地 Clash"></div>
+        <div class="field"><label>类型</label><select data-proxy-field="type">
+          <option value="http" ${x.type !== 'socks5' ? 'selected' : ''}>HTTP</option>
+          <option value="socks5" ${x.type === 'socks5' ? 'selected' : ''}>SOCKS5</option>
+        </select></div>
+        <div class="field"><label>主机</label><input type="text" data-proxy-field="host" value="${esc(x.host)}" placeholder="127.0.0.1"></div>
+        <div class="field"><label>端口</label><input type="text" inputmode="numeric" data-proxy-field="port" value="${esc(x.port)}" placeholder="7890"></div>
+        <div class="field"><label>用户名（可选）</label><input type="text" data-proxy-field="username" value="${esc(x.username)}"></div>
+        <div class="field"><label>密码（可选）</label><input type="password" data-proxy-field="password" value="" placeholder="${x.hasAuth ? '已设置，留空保持不变' : '留空表示无认证'}"></div>
+      </div>
+      <div class="proxy-apply">
+        <span class="hint" data-role="proxy-used">${esc(use.names.length ? `当前指定使用：${use.names.join('、')}` : '当前没有服务商指定这条代理')}</span>
+        <select data-proxy-apply>${applyOptions}</select>
+        <button class="btn small primary" data-act="apply-proxy">应用到此组</button>
+        <span class="hint" data-role="proxy-test"></span>
+      </div>
+    </div>
+  </details>`;
+}
+
+function renderProxies() {
+  // 重绘前记住每条的展开状态，避免自动保存后全部弹开或收起
+  document.querySelectorAll('#proxyList .proxy-row').forEach((d) => {
+    const id = d.dataset.proxyId;
+    if (!id) return;
+    if (d.open) state.proxyOpen.add(id);
+    else state.proxyOpen.delete(id);
+  });
+  $('#proxyList').innerHTML = state.proxies.length
+    ? state.proxies.map(proxyRowHtml).join('')
+    : '<div class="empty">还没有代理，所有渠道默认本地直连。点下方「+ 添加代理」即可新增，默认会加入代理池。</div>';
+  updatePoolUi();
+  updateProxyFoldLabel();
+}
+
+// 只更新文字，不重建代理行，避免打断正在输入的内容
+function updateProxyUsage() {
+  document.querySelectorAll('#proxyList .proxy-row').forEach((row) => {
+    const x = state.proxies.find((v) => v.id === row.dataset.proxyId);
+    if (!x) return;
+    const use = proxyUsage(x);
+    const tag = row.querySelector('[data-role="proxy-usage"]');
+    if (tag) {
+      tag.textContent = proxyUsageText(use);
+      tag.className = `proxy-tag ${use.count ? 'used' : 'warn'}`;
+    }
+    const used = row.querySelector('[data-role="proxy-used"]');
+    if (used) used.textContent = use.names.length ? `当前指定使用：${use.names.join('、')}` : '当前没有服务商指定这条代理';
+  });
+}
+
+function updateProxyFoldLabel() {
+  const btn = $('#btnProxyFold');
+  if (!btn) return;
+  const rows = [...document.querySelectorAll('#proxyList .proxy-row')];
+  btn.textContent = rows.length && rows.every((d) => d.open) ? '全部收起' : '全部展开';
+}
+
+// 代理池变动后只刷新下拉选项，不重建服务商卡片，避免正在输入的内容丢失
+function refreshProxySelects() {
+  state.providers.forEach((p) => {
+    const card = document.querySelector(`.provider-card[data-pid="${p.id}"]`);
+    if (!card) return;
+    const mode = card.querySelector('[data-field="egressMode"]');
+    const sel = card.querySelector('[data-field="proxyId"]');
+    if (mode) mode.value = p.egressMode || 'direct';
+    if (sel) {
+      sel.innerHTML = proxyOptionsHtml(p.proxyId);
+      sel.value = p.proxyId || '';
+      sel.disabled = (p.egressMode || 'direct') !== 'single';
+      if (!sel.value && p.proxyId) p.proxyId = '';
+    }
+  });
+  document.querySelectorAll('[data-ch-field="proxyId"]').forEach((sel) => {
+    const keep = sel.value;
+    sel.innerHTML = proxyOptionsHtml(keep);
+    sel.value = keep;
+  });
+}
+
+function egressLabel(c) {
+  if (c.egressMode === 'pool') return '代理池轮询';
+  if (c.egressMode === 'single') {
+    const x = state.proxies.find((v) => v.id === c.proxyId);
+    return `指定代理：${x ? (x.label || x.host) : '（已失效）'}`;
+  }
+  return '本地直连';
+}
+
+function proxyPayload() {
+  return state.proxies.map((x) => ({
+    id: x.id, label: x.label, type: x.type, host: x.host, port: x.port,
+    username: x.username, password: x.password || '',
+    enabled: x.enabled, inPool: x.inPool !== false,
+  }));
+}
+
+async function saveProxies(quiet = false) {
+  const r = await api('/api/proxies', 'PUT', { proxies: proxyPayload() });
+  state.proxies = r.proxies.map((x) => ({ ...x, password: '' }));
+  document.querySelectorAll('#proxyList [data-proxy-field="password"]').forEach((inp) => {
+    const x = state.proxies.find((v) => v.id === inp.closest('.proxy-row').dataset.proxyId);
+    inp.value = '';
+    inp.placeholder = x && x.hasAuth ? '已设置，留空保持不变' : '留空表示无认证';
+  });
+  refreshProxySelects();
+  updateEgressBadges();
+  updateProxyUsage();
+  updatePoolUi();
+  if (!quiet) showMsg('代理池已保存', 'ok', '#proxyMsg');
+  return r;
+}
+
+function scheduleProxySave() {
+  clearTimeout(proxySaveTimer);
+  showMsg('同步中…', '', '#proxyMsg');
+  proxySaveTimer = setTimeout(async () => {
+    try {
+      await saveProxies(true);
+      showMsg('✔ 已自动保存', 'ok', '#proxyMsg');
+    } catch (err) {
+      showMsg('代理池保存失败：' + err.message, 'err', '#proxyMsg');
+    }
+  }, 300);
+}
+
 // ---- 保存 ----
 
 function providerPayload() {
@@ -374,6 +689,7 @@ function providerPayload() {
     id: p.id, label: p.label, url: p.url, apiKey: p.apiKey || '',
     noAuth: p.noAuth, prefix: p.prefix, chatUrl: p.chatUrl,
     modelsUrl: p.modelsUrl, selected: p.selected || [],
+    egressMode: p.egressMode || 'direct', proxyId: p.proxyId || '',
   }));
 }
 
@@ -384,6 +700,10 @@ async function saveAll(quiet = false) {
   });
   state.providers = r.providers.map((p) => ({ ...p, apiKey: '' }));
   state.channels = r.channels;
+  refreshProxySelects();
+  updateEgressBadges();
+  updateProxyUsage();
+  updatePoolSummary();
   renderDynamic();
   if (!quiet) showMsg('已保存全部服务商配置', 'ok');
   return r;
@@ -419,7 +739,8 @@ async function load() {
   const data = await api('/api/state');
   state = {
     providers: data.providers.map((p) => ({ ...p, apiKey: '' })),
-    channels: data.channels, token: data.token, port: data.port,
+    channels: data.channels, proxies: data.proxies || [],
+    token: data.token, port: data.port, proxyOpen: new Set(),
     targetPath: data.targetPath || '', lastApply: data.lastApply || null,
   };
   $('#token').value = data.token || '';
@@ -439,6 +760,8 @@ async function load() {
     } catch { /* 生成失败不阻塞页面 */ }
   }
   renderProviders();
+  renderProxies();
+  refreshProxySelects();
   renderDynamic();
   setApplyResult(lastApplySummary(data.lastApply), 'muted');
   updateFoldAllLabel();
@@ -453,13 +776,24 @@ document.addEventListener('input', (e) => {
   const val = el.type === 'checkbox' ? el.checked : el.value;
   const card = el.closest('.provider-card');
 
+  const proxyRow = el.closest('.proxy-row');
+  if (proxyRow && ds.proxyField) {
+    const x = state.proxies.find((v) => v.id === proxyRow.dataset.proxyId);
+    if (!x) return;
+    x[ds.proxyField] = val;
+    // 密码等失焦后再保存，避免输入到一半就整行重绘或写入
+    if (ds.proxyField !== 'password') scheduleProxySave();
+    updatePoolUi();
+    return;
+  }
+
   if (ds.model !== undefined) {
     const p = providerById(card.dataset.pid);
     if (!p) return;
     const set = new Set(p.selected || []);
     if (el.checked) set.add(ds.model); else set.delete(ds.model);
     p.selected = [...set];
-    el.closest('.model-row').classList.toggle('picked', el.checked);
+    el.closest('.model-item').classList.toggle('picked', el.checked);
     const hiddenFree = uiFor(p.id).hideFree ? (p.models || []).filter((m) => m.free).length : 0;
     const pickedFree = (p.models || []).filter((m) => m.free && p.selected.includes(m.id)).length;
     const visible = visibleModels(p).length;
@@ -499,6 +833,11 @@ document.addEventListener('input', (e) => {
       const keyInput = card.querySelector('[data-field="apiKey"]');
       if (keyInput) keyInput.disabled = el.checked;
     }
+    if (ds.field === 'egressMode') {
+      const sel = card.querySelector('[data-field="proxyId"]');
+      if (sel) sel.disabled = val !== 'single';
+      if (val !== 'single') { p.proxyId = ''; if (sel) sel.value = ''; }
+    }
     // 服务商信息改动自动落库；密钥等失焦后再存，避免输入到一半被写入
     if (ds.field !== 'apiKey') scheduleSave();
     return;
@@ -508,13 +847,29 @@ document.addEventListener('input', (e) => {
     const c = channelById(wrap.dataset.cid);
     if (!c) return;
     c[ds.chField] = val;
+    if (ds.chField === 'egressMode') {
+      const sel = wrap.querySelector('[data-ch-field="proxyId"]');
+      if (sel) sel.disabled = val !== 'single';
+      if (val !== 'single') { c.proxyId = ''; if (sel) sel.value = ''; }
+    }
     if (ds.chField === 'enabled') wrap.classList.toggle('disabled', !el.checked);
   }
 });
 
 // 密钥失焦后再保存，避免输入到一半被写入数据库
 document.addEventListener('change', (e) => {
-  if (e.target.dataset && e.target.dataset.field === 'apiKey') scheduleSave();
+  const ds = e.target.dataset || {};
+  if (ds.field === 'apiKey') scheduleSave();
+  else if (ds.proxyField === 'password') scheduleProxySave();
+  else if (ds.field === 'egressMode' || ds.field === 'proxyId') {
+    const card = e.target.closest('.provider-card');
+    const p = card ? providerById(card.dataset.pid) : null;
+    if (p) { p[ds.field] = e.target.value; scheduleSave(); }
+  } else if (ds.chField === 'egressMode' || ds.chField === 'proxyId') {
+    const wrap = e.target.closest('.channel');
+    const c = wrap ? channelById(wrap.dataset.cid) : null;
+    if (c) c[ds.chField] = e.target.value;
+  }
 });
 
 document.addEventListener('keydown', (e) => {
@@ -528,6 +883,55 @@ document.addEventListener('click', (e) => {
   });
 });
 $('#btnCloseModal').addEventListener('click', closeModal);
+
+// 折叠标题里的按钮只执行自身动作，不连带把整块展开 / 收起
+document.addEventListener('click', (e) => {
+  if (e.target instanceof Element
+    && e.target.closest('summary button, summary a, summary input, summary select')) {
+    e.preventDefault();
+  }
+}, true);
+
+// 整行点击：服务商卡片折叠、可用模型详情、已生成渠道编辑
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  if (!(t instanceof Element) || isRowControl(t)) return;
+
+  const head = t.closest('.provider-head');
+  if (head) { toggleCard(head.closest('.provider-card')); return; }
+
+  const mRow = t.closest('.model-row');
+  if (mRow) {
+    const card = mRow.closest('.provider-card');
+    const p = card ? providerById(card.dataset.pid) : null;
+    if (!p) return;
+    const u = uiFor(p.id);
+    const mid = mRow.dataset.modelId;
+    if (u.detailModels.has(mid)) u.detailModels.delete(mid);
+    else u.detailModels.add(mid);
+    renderModelList(p, card);
+    return;
+  }
+
+  const compact = t.closest('.channel.compact .compact-row');
+  if (compact) {
+    const wrap = compact.closest('.channel');
+    const c = channelById(wrap.dataset.cid);
+    if (!c) return;
+    uiFor(c.providerId || '__standalone__').editCid = c.id;
+    renderDynamic();
+    return;
+  }
+
+  const fullHead = t.closest('.channel:not(.compact) .channel-head');
+  if (fullHead) {
+    const wrap = fullHead.closest('.channel');
+    const c = channelById(wrap.dataset.cid);
+    if (!c) return;
+    uiFor(c.providerId || '__standalone__').editCid = '';
+    renderDynamic();
+  }
+});
 
 // 路径与令牌改动即时记住，刷新后自动回填
 $('#targetPath').addEventListener('change', async () => {
@@ -549,6 +953,7 @@ async function saveChannel(cid) {
     noAuth: Boolean(c.noAuth),
     supportsToolCall: c.supportsToolCall, supportsImages: c.supportsImages,
     supportsReasoning: c.supportsReasoning, enabled: c.enabled,
+    egressMode: c.egressMode || 'direct', proxyId: c.proxyId || '',
   });
   state.channels = r.channels;
   return r;
@@ -567,15 +972,69 @@ document.addEventListener('click', async (e) => {
   const cid = wrap ? wrap.dataset.cid : '';
   const c = cid ? channelById(cid) : null;
   try {
-    if (act === 'toggle-card') {
-      const u = uiFor(pid);
-      u.openCard = !u.openCard;
-      card.querySelector('.provider-body').hidden = !u.openCard;
-      card.querySelectorAll('[data-act="toggle-card"]').forEach((b) => {
-        b.textContent = b.classList.contains('fold-btn')
-          ? (u.openCard ? '▾' : '▸') : (u.openCard ? '收起' : '展开');
+    if (act === 'toggle-pool') {
+      const row = btn.closest('.proxy-row');
+      const x = state.proxies.find((v) => v.id === row.dataset.proxyId);
+      if (!x) return;
+      x.inPool = x.inPool === false;
+      await saveProxies(true);
+      showMsg(x.inPool
+        ? `已把「${x.label || x.host}」加入代理池，轮询会用到它`
+        : `已把「${x.label || x.host}」移出代理池，轮询不再使用它`, 'ok', '#proxyMsg');
+    } else if (act === 'test-proxy') {
+      const row = btn.closest('.proxy-row');
+      const out = row.querySelector('[data-role="proxy-test"]');
+      if (!row.dataset.proxyId) {
+        out.textContent = '代理正在保存，请稍后再试';
+        out.className = 'hint err';
+        return;
+      }
+      btn.disabled = true;
+      out.textContent = '正在测试出口…';
+      out.className = 'hint';
+      try {
+        const r = await api('/api/proxy-test', 'POST', { id: row.dataset.proxyId });
+        out.textContent = r.ok ? `出口 IP ${r.ip} · ${r.target}` : `测试失败：${r.error}`;
+        out.className = r.ok ? 'hint ok' : 'hint err';
+      } catch (err) {
+        out.textContent = '测试失败：' + err.message;
+        out.className = 'hint err';
+      }
+      btn.disabled = false;
+    } else if (act === 'apply-proxy') {
+      const row = btn.closest('.proxy-row');
+      const pid = row.querySelector('[data-proxy-apply]').value;
+      const p = state.providers.find((v) => v.id === pid);
+      if (!p) { showMsg('请先添加服务商，再应用代理', 'err', '#proxyMsg'); return; }
+      if (!row.dataset.proxyId) { showMsg('代理正在保存，请稍后再试', '', '#proxyMsg'); return; }
+      p.egressMode = 'single';
+      p.proxyId = row.dataset.proxyId;
+      await saveAll(true);
+      refreshProxySelects();
+      updateEgressBadges();
+      updateProxyUsage();
+      showMsg(`已把「${p.label || p.id}」的网络出口切到这条代理`, 'ok', '#proxyMsg');
+    } else if (act === 'delete-proxy') {
+      const row = btn.closest('.proxy-row');
+      const proxyId = row.dataset.proxyId;
+      if (btn.dataset.confirm !== '1') {
+        btn.dataset.confirm = '1';
+        btn.textContent = '确认删除';
+        showMsg('再次点击才会删除这条代理', '', '#proxyMsg');
+        return;
+      }
+      state.proxies = state.proxies.filter((x) => x.id !== proxyId);
+      // 引用了被删代理的服务商回退直连，避免留下失效配置
+      state.providers.forEach((v) => {
+        if (v.proxyId === proxyId) { v.proxyId = ''; v.egressMode = 'direct'; }
       });
-      updateFoldAllLabel();
+      await saveProxies(true);
+      await saveAll(true);
+      renderProxies();
+      refreshProxySelects();
+      showMsg('已删除该代理，引用它的服务商已回退为直连', 'ok', '#proxyMsg');
+    } else if (act === 'toggle-card') {
+      toggleCard(card);
     } else if (act === 'delete-provider') {
       if (btn.dataset.confirm !== '1') {
         btn.dataset.confirm = '1';
@@ -669,6 +1128,37 @@ document.addEventListener('click', async (e) => {
     }
   }
 });
+
+$('#btnAddProxy').addEventListener('click', async () => {
+  $('#proxyCard').open = true;
+  const before = new Set(state.proxies.map((x) => x.id));
+  state.proxies.push({
+    id: '', label: '', type: 'http', host: '127.0.0.1', port: 7890,
+    username: '', password: '', enabled: true, inPool: true, hasAuth: false,
+  });
+  renderProxies();
+  try {
+    await saveProxies(true); // 由服务端分配正式 ID，随后重绘以同步 data-proxy-id
+    const fresh = state.proxies.find((x) => !before.has(x.id));
+    if (fresh) state.proxyOpen.add(fresh.id); // 新加的一条保持展开，方便立刻填写
+    renderProxies();
+    showMsg('已添加一条代理，填好主机与端口会自动保存', 'ok', '#proxyMsg');
+  } catch (err) {
+    showMsg('添加失败：' + err.message, 'err', '#proxyMsg');
+  }
+});
+
+$('#btnProxyFold').addEventListener('click', () => {
+  const rows = [...document.querySelectorAll('#proxyList .proxy-row')];
+  const shouldOpen = rows.some((d) => !d.open);
+  rows.forEach((d) => { d.open = shouldOpen; });
+  updateProxyFoldLabel();
+});
+
+// details 的 toggle 不冒泡，用捕获阶段同步「全部展开/收起」按钮文字
+document.addEventListener('toggle', (e) => {
+  if (e.target.classList && e.target.classList.contains('proxy-row')) updateProxyFoldLabel();
+}, true);
 
 $('#btnAddProvider').addEventListener('click', async () => {
   try {
@@ -787,15 +1277,15 @@ $('#btnApply').addEventListener('click', async () => {
     const r = await api('/api/apply', 'POST', { path: target });
     const a = r.lastApply || {};
     state.lastApply = a;
-    setApplyResult(`写入完成 ${a.at} · 新增 ${r.added} / 更新 ${r.updated}${r.replaced ? ` / 替换旧名称 ${r.replaced}` : ''} · 备份 ${r.backupName}`, 'ok');
+    setApplyResult(`写入完成 ${a.at} · 新增 ${r.added} / 更新 ${r.updated} / 移除 ${r.removed || 0}${r.replaced ? ` / 替换旧名称 ${r.replaced}` : ''} · 备份 ${r.backupName}`, 'ok');
     const rows = [
       ['目标文件', r.file],
       ['备份文件', `${r.backupName}（本机时间命名）`],
       ['写入时间', `${a.at}（本机时间）`],
-      ['写入结果', `共 ${r.total} 条：新增 ${r.added} 条、更新 ${r.updated} 条${r.replaced ? `、替换旧名称 ${r.replaced} 条` : ''}（${r.format === 'array' ? '数组' : '对象'}结构）`],
+      ['写入结果', `共 ${r.total} 条：新增 ${r.added} 条、更新 ${r.updated} 条、移除 ${r.removed || 0} 条${r.replaced ? `（其中旧名称替换 ${r.replaced} 条）` : ''}（${r.format === 'array' ? '数组' : '对象'}结构）`],
       ['名称格式', $('#nameTemplate').value || DEFAULT_NAME_TEMPLATE],
     ].map(([k, v]) => `<div class="kv"><span>${esc(k)}</span><code>${esc(v)}</code></div>`).join('');
-    showModal('写入成功', `<p>配置已写入并备份完成，id 与 name 相同，设置页、模型下拉、网关页三处名称已统一。</p>${rows}<p class="hint" style="margin:12px 0 0">无需重复点击。完全退出并重启客户端后，即可看到新的统一名称。</p>`);
+    showModal('写入成功', `<p>配置已写入并备份完成，id 与 name 相同，设置页、模型下拉、网关页三处名称已统一。已按当前勾选同步，取消勾选或禁用的旧模型已从客户端配置里移除。</p>${rows}<p class="hint" style="margin:12px 0 0">无需重复点击。完全退出并重启客户端后，即可看到新的统一名称。</p>`);
     const p = await api('/api/preview', 'POST', {});
     setEntries(p.entries);
   } catch (err) {

@@ -19,6 +19,7 @@
       </div>
     </div>
     <div class="hero-side">
+      <a class="repo-link" href="https://github.com/Aidea-cc/workbuddy-model-hub" target="_blank" rel="noopener noreferrer" title="在 GitHub 查看源码与说明">GitHub 仓库 <span aria-hidden="true">↗</span></a>
       <div id="status" class="status" aria-live="polite">连接中</div>
       <span class="hero-port">127.0.0.1:<b id="statPort">8787</b></span>
     </div>
@@ -49,9 +50,9 @@
       </div>
     </div>
     <div id="msg" class="msg top-msg" aria-live="polite"></div>
-    <details class="intro">
+    <details class="intro row-toggle">
       <summary>分组规则与自动保存说明</summary>
-      <p class="hint">一个服务商就是一张卡片：共用名字 / 地址 / 密钥，勾选模型即自动生成渠道，改一处整组生效。所有改动自动保存，刷新或重启都不会丢。模型清单与渠道列表默认收起，按需点开；点标题旁的箭头可收起整组。接新平台点「+ 添加服务商」。</p>
+      <p class="hint">一个服务商就是一张卡片：共用名字 / 地址 / 密钥，勾选模型即自动生成渠道，改一处整组生效。所有改动自动保存，刷新或重启都不会丢。<strong>点击服务商标题整行</strong>可收起 / 展开整组；模型清单、渠道列表、高级选项与所有说明标题也都是整行可点，按需展开。可用模型清单里点击模型行查看详情，点击前面的勾选框启用该模型；已生成的渠道点击整行即可展开编辑，再点标题行收起。接新平台点「+ 添加服务商」。</p>
     </details>
     <div id="providers" class="providers"></div>
 
@@ -77,12 +78,12 @@
     </div>
     <div id="applyResult" class="apply-result" aria-live="polite"></div>
 
-    <details class="fold out-fold" id="outputWrap">
+    <details class="fold out-fold row-toggle" id="outputWrap">
       <summary>配置片段 <span class="fold-note" id="outputCount"></span></summary>
       <div class="fold-body"><pre id="output" class="output">点击「生成」查看配置片段</pre></div>
     </details>
 
-    <details class="advanced card-advanced">
+    <details class="advanced card-advanced row-toggle">
       <summary>高级设置（显示名格式 · 访问令牌 · 写入说明）</summary>
       <div class="name-style-row">
         <label for="nameTemplate">统一显示名格式</label>
@@ -95,11 +96,23 @@
         <input id="token" type="text" placeholder="留空则不校验；设置后客户端 apiKey 需填同一值">
         <span class="hint" style="margin:0">仅限制本机其他进程调用网关，不是上游密钥</span>
       </div>
-      <p class="hint" style="margin:10px 0 0">生成的条目可追加到 WorkBuddy 的 models.json；Trae 等客户端把请求地址指向网关、模型 ID 填本地 ID 即可。路径、片段和服务商信息会自动记住；写入前生成 .bak 备份并保留原有条目，完成后在按钮下方和弹窗显示结果，无需反复点击。数组与含 models/availableModels 的对象结构都支持。</p>
+      <p class="hint" style="margin:10px 0 0">生成的条目可追加到 WorkBuddy 的 models.json；Trae 等客户端把请求地址指向网关、模型 ID 填本地 ID 即可。路径、片段和服务商信息会自动记住；写入前生成 .bak 备份，并以当前勾选为准同步——新增、更新、移除本工具生成的条目（取消勾选或禁用后自动删掉客户端里的旧模型），你自己添加的条目保持不变；完成后在按钮下方和弹窗显示结果，无需反复点击。数组与含 models/availableModels 的对象结构都支持。</p>
     </details>
   </section>
 
-  <details class="card help-card">
+  <details class="card help-card proxy-card row-toggle" id="proxyCard">
+    <summary><span class="step ghost-step">⇄</span>网络代理（默认直连，按需展开）<span class="fold-note" id="proxyCount"></span></summary>
+    <p class="hint" style="margin:0 0 12px">所有服务商默认本地直连。<strong>仅添加代理不会生效</strong>：还要在服务商卡片把「网络出口」设为指定代理或代理池轮询，或在这里展开某条代理点「应用到此组」。同组模型共用一个出口；代理凭据保存在 <code>channels.db</code>，请勿分享。整张卡片标题、每条代理整行都可点击展开 / 收起。</p>
+    <div id="poolSummary" class="pool-summary"></div>
+    <div id="proxyList" class="proxy-list"></div>
+    <div class="proxy-actions">
+      <button id="btnAddProxy" class="btn primary small">+ 添加代理</button>
+      <button id="btnProxyFold" class="btn small">全部展开</button>
+      <span id="proxyMsg" class="msg" aria-live="polite"></span>
+    </div>
+  </details>
+
+  <details class="card help-card row-toggle">
     <summary><span class="step ghost-step">?</span>使用说明与原理</summary>
     <ol class="steps">
       <li>点「+ 添加服务商」新增一组，填名字、地址、API Key（本地免鉴权服务可勾选「无需密钥」），点「获取模型」自动探测该服务商的模型清单。</li>
@@ -107,23 +120,27 @@
       <li>卡片下方的「已生成的渠道」可逐条测试连接、编辑别名与能力开关、删除；删除派生渠道等于取消该模型的勾选。</li>
       <li>在「导出客户端配置」点「生成」，复制条目到客户端配置文件，或填绝对路径点「备份并写入」；保持本服务运行，重启客户端即可在模型列表里看到每个模型一条独立选项。</li>
     </ol>
-    <details class="note">
+    <details class="note row-toggle">
       <summary><strong>支持哪些服务商</strong></summary>
       <p>任何暴露 OpenAI 兼容 <code>GET /models</code> 的 API 都可以——OpenRouter、OpenCode Zen、硅基流动、DeepSeek / 智谱 / Moonshot 官方、vLLM / Ollama / LM Studio / One-API 类自建网关等。地址可填根域名、<code>/v1</code>、<code>/api/v1</code> 或完整 <code>/chat/completions</code>，会自动尝试多个常见模型列表地址；接口位置特殊时在该组「高级选项」手动填即可。纯客户端（WorkBuddy、Trae 等）不提供模型列表接口，属于「导出客户端配置」的接入对象，不是这里的服务商。</p>
     </details>
-    <details class="note">
+    <details class="note row-toggle">
       <summary><strong>为什么必须走网关</strong></summary>
       <p>客户端把 <code>id</code> 原样作为请求体 <code>model</code> 发出，且用 <code>id</code> 做列表去重。两个渠道若都要求同一个模型名，纯改配置无法兼顾「都不重复」和「都发对名字」。网关把本地唯一 ID 改写成各渠道真实模型名，并换成对应地址与密钥，因此真实模型名可以相同也可以不同。</p>
     </details>
-    <details class="note">
+    <details class="note row-toggle">
       <summary><strong>三处名称统一</strong></summary>
-      <p>WorkBuddy 设置页显示条目的 <code>name</code>；模型下拉在 <code>name</code> 与 <code>id</code> 不同时会拼成 <code>name:id</code>，两者相同时只显示一次。因此本工具让 <code>id</code> 与 <code>name</code> 完全相同，网关页面也显示同一个名字，三处都是「服务商·模型名」。写入时按网关地址认领并替换旧 ID 的条目，不会留下重复模型；末尾的「自定义」标签是客户端自己加的。</p>
+      <p>WorkBuddy 设置页显示条目的 <code>name</code>；模型下拉在 <code>name</code> 与 <code>id</code> 不同时会拼成 <code>name:id</code>，两者相同时只显示一次。因此本工具让 <code>id</code> 与 <code>name</code> 完全相同，网关页面也显示同一个名字，三处都是「服务商·模型名」。写入时按网关地址认领并替换旧 ID 的条目，不会留下重复模型；取消勾选或禁用的渠道会同步从客户端配置里移除，你自己添加的条目不受影响。末尾的「自定义」标签是客户端自己加的。</p>
     </details>
-    <details class="note">
+    <details class="note row-toggle">
       <summary><strong>免费模型与 429</strong></summary>
       <p>「测试连接」返回 <code>Free usage limit reached</code> / HTTP 429 时，是上游服务商的策略限制，不是网关故障。例如 OpenCode 官方文档明确写明「Free-tier chat models require OpenCode; use paid models or Go from other clients」，即免费层模型只供其自家客户端使用，第三方客户端需改用付费模型或订阅 Go。零定价模型默认已隐藏，取消「隐藏零定价模型」可查看；建议改用非零定价模型、给账户充值或换一家服务商。</p>
     </details>
-    <details class="note">
+    <details class="note row-toggle">
+      <summary><strong>网络代理与出口</strong></summary>
+      <p>默认所有请求本地直连。需要代理时先在「网络代理」里添加 HTTP 或 SOCKS5 代理，再在服务商卡片可见的「网络出口」里选「指定代理」或「代理池轮询」，也可在代理条目里点「应用到此组」一键设置；同组模型共用该出口，独立渠道可在编辑里单独设置。<strong>怎么加入代理池</strong>：新添加的代理默认就在池中，代理条目标「池内」；点这个标签可移出代理池（变「未入池」），再点一次即可重新加入。只有标为「池内」且已启用、主机端口完整的代理才会参与轮询，「指定代理」模式不受入池状态影响。代理池概览会实时列出池内成员与条数。服务商卡片头部常显当前出口，代理条目标「未使用」时说明还没有任何请求会走它。HTTP 代理用 CONNECT 隧道，SOCKS5 支持无认证与账号密码认证，HTTPS 上游会先建隧道再做 TLS 握手，SSE 流式响应原样透传。网关响应头 <code>x-egress</code> 会标明本次实际出口；代理不可用或代理池为空时返回 502 并说明原因，不会静默退回直连。</p>
+    </details>
+    <details class="note row-toggle">
       <summary><strong>注意</strong></summary>
       <p>服务必须常驻，关闭后所有渠道会连接失败；服务商信息、模型清单和密钥保存在项目目录的 <code>channels.db</code>，备份时直接复制该文件，请勿分享（内含密钥）。能力来自上游声明或名称推断，未做真实图片请求实测，建议用「测试连接」或实际发张图确认。</p>
     </details>
