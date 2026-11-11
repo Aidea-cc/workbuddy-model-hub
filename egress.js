@@ -8,6 +8,7 @@ const http = require('node:http');
 const https = require('node:https');
 
 const CONNECT_TIMEOUT = 15000;
+const EGRESS_TIMEOUT = 25000; // 整体请求（含 TLS 握手与响应）超时，避免代理不稳时无限挂起
 
 function connectNet(host, port) {
   return new Promise((resolve, reject) => {
@@ -124,7 +125,8 @@ function tlsWrap(sock, host) {
     // IP 地址不设 servername，避免 RFC 6066 告警
     const opts = { socket: sock };
     if (!net.isIP(host)) opts.servername = host;
-    const t = tls.connect(opts, () => resolve(t));
+    const t = tls.connect(opts, () => { t.setTimeout(0); resolve(t); });
+    t.setTimeout(EGRESS_TIMEOUT, () => t.destroy(new Error('TLS 握手超时')));
     t.once('error', reject);
   });
 }
@@ -203,6 +205,7 @@ function egressFetch(urlStr, options = {}, proxy = null) {
         body: res,
       });
     });
+    req.setTimeout(EGRESS_TIMEOUT, () => req.destroy(new Error('上游响应超时')));
     req.on('error', reject);
     if (options.signal) {
       if (options.signal.aborted) { req.destroy(new Error('请求已取消')); return; }

@@ -1176,6 +1176,31 @@ async function handleApi(req, res, pathname) {
 }
 
 // 网关：本地唯一 id -> 该渠道真实 model 名，并换成该渠道的地址与密钥
+// 免费模型判定：OpenCode 限时免费模型（名为 big-pickle 或以 -free 结尾）
+function isFreeModel(id) {
+  return id === 'big-pickle' || String(id || '').endsWith('-free');
+}
+
+// 渠道可用出口列表：直连=[null]；单代理=[p]；代理池=全部启用且进池的代理
+function proxiesForChannel(row) {
+  if (row.egress_mode === 'single' && row.proxy_id) {
+    const p = db.prepare('SELECT * FROM proxies WHERE id = ?').get(row.proxy_id);
+    return p ? [p] : [];
+  }
+  if (row.egress_mode === 'pool') {
+    const list = db.prepare('SELECT * FROM proxies WHERE enabled = 1 AND in_pool = 1').all();
+    return list.length ? list : [];
+  }
+  return [null];
+}
+
+// 是否可换下一个候选（代理/模型）重试：网络错误、地区不可达、免费限额等可重试；鉴权失败等直接返回
+function isRetryable(status, text) {
+  if (status === 401) return false; // 鉴权失败，不可重试
+  if (status === 400 && !/unavailable|not available|not.*available in your|country|region|Free usage/i.test(text || '')) return false; // 大概率是请求本身有误
+  return true; // 网络错误(502)、403/429、地区/模型不可用等均可换代理或模型重试
+}
+
 async function proxy(req, res, pathname) {
   const alias = pathname.split('/').filter(Boolean)[0];
   const row = alias ? db.prepare('SELECT * FROM channels WHERE alias = ? AND enabled = 1').get(alias) : null;
@@ -1196,33 +1221,91 @@ async function proxy(req, res, pathname) {
     return json(res, 400, { error: { message: '请求体不是合法 JSON', type: 'proxy_error' } });
   }
   const localId = body.model;
-  body.model = row.upstream_model;
+  const requestedModel = row.upstream_model;
 
-  const headers = upstreamHeaders(row);
-  if (req.headers['http-referer']) headers['http-referer'] = req.headers['http-referer'];
-  if (req.headers['x-title']) headers['x-title'] = req.headers['x-title'];
+  // 免费模型回退环：同服务商内其它免费模型，撞每日限额/不可用时自动切换
+  const freeRing = (row.provider_id && isFreeModel(requestedModel))
+    ? db.prepare("SELECT upstream_model FROM channels WHERE provider_id = ? AND enabled = 1 AND (upstream_model = 'big-pickle' OR upstream_model LIKE '%-free') ORDER BY sort_order, alias").all(row.provider_id).map((r) => r.upstream_model)
+    : [];
+  const models = freeRing.length ? freeRing : [requestedModel];
+  const proxies = proxiesForChannel(row);
+  const maxAttempts = models.length * Math.max(1, proxies.length); // 穷举所有(模型×代理)组合，由下方短路提前结束
 
-  let egress;
-  let upstream;
-  try {
-    egress = proxyForChannel(row);
-    upstream = await egressFetch(row.url, { method: 'POST', headers, body: JSON.stringify(body) }, egress);
-  } catch (err) {
-    return json(res, 502, { error: { message: `上游请求失败：${err.message}`, type: 'proxy_error' } });
-  }
-  res.writeHead(upstream.status, {
-    'content-type': upstream.headers.get('content-type') || 'application/json',
-    'x-upstream': row.alias,
-    'x-upstream-model': row.upstream_model,
-    'x-egress': egress ? `${egress.type}://${egress.host}:${egress.port}` : 'direct',
-  });
-  if (upstream.body) {
-    for await (const chunk of upstream.body) {
-      if (!res.write(Buffer.from(chunk))) await new Promise((r) => res.once('drain', r));
+  let seenFreeLimit = false;
+  const freeLimitModels = new Set();
+  let attempts = 0;
+  let lastErr = null;
+  let lastTriedModel = requestedModel; // 最后一次实际尝试的上游模型，用于错误头与日志
+
+  outer:
+  for (const m of models) {
+    lastTriedModel = m; // 记录当前尝试的模型
+    for (const px of proxies) {
+      if (++attempts > maxAttempts) break outer;
+      const thisBody = { ...body, model: m }; // 始终用当前上游真实模型名覆盖客户端传入的 model
+      const headers = upstreamHeaders(row);
+      if (req.headers['http-referer']) headers['http-referer'] = req.headers['http-referer'];
+      if (req.headers['x-title']) headers['x-title'] = req.headers['x-title'];
+
+      let errStatus = null, errText = null, retryAfter = null, egress = null, upstream = null;
+      try {
+        egress = px;
+        upstream = await egressFetch(row.url, { method: 'POST', headers, body: JSON.stringify(thisBody) }, px);
+      } catch (err) {
+        lastErr = { status: 502, text: JSON.stringify({ error: { message: `上游请求失败：${err.message}`, type: 'proxy_error' } }) };
+        continue; // 网络/超时错误：换下一个代理或模型重试
+      }
+
+      if (upstream.status >= 200 && upstream.status < 300) {
+        const fellBack = m !== requestedModel;
+        res.writeHead(upstream.status, {
+          'content-type': upstream.headers.get('content-type') || 'application/json',
+          'x-upstream': row.alias,
+          'x-upstream-model': m,
+          'x-egress': egress ? `${egress.type}://${egress.host}:${egress.port}` : 'direct',
+          ...(fellBack ? { 'x-fallback-from': requestedModel, 'x-fallback-to': m } : {}),
+        });
+        if (upstream.body) {
+          for await (const chunk of upstream.body) {
+            if (!res.write(Buffer.from(chunk))) await new Promise((r) => res.once('drain', r));
+          }
+        }
+        res.end();
+        console.log(`[${row.alias}] ${localId} -> ${m} | ${upstream.status}${fellBack ? ` (免费回退: ${requestedModel}, 出口 ${egress ? `${egress.host}:${egress.port}` : 'direct'})` : ''}`);
+        return;
+      }
+
+      // 错误：读取完整响应体用于判定与回传
+      errStatus = upstream.status;
+      retryAfter = upstream.headers.get('retry-after');
+      const buf = [];
+      if (upstream.body) { for await (const c of upstream.body) buf.push(Buffer.from(c)); }
+      errText = Buffer.concat(buf).toString('utf8');
+      lastErr = { status: errStatus, text: errText, retryAfter };
+
+      // 免费额度耗尽（账号级共享）：若已有两个不同免费模型都撞限额，判定整组不可用，停止尝试其余免费模型避免高延迟
+      const isFreeModelError = errStatus >= 400 && /Free usage limit|FreeUsageLimitError|unavailable|not available|not.*available in your/i.test(errText || '');
+      if (isFreeModelError) {
+        console.log(`[${row.alias}] 免费模型 ${m} 撞限额/不可用，回退 (已撞 ${freeLimitModels.size + 1} 个不同免费模型)`);
+        if (seenFreeLimit && freeLimitModels.size >= 2) break outer;
+        seenFreeLimit = true;
+        freeLimitModels.add(m);
+        continue;
+      }
+      if (!isRetryable(errStatus, errText)) break outer; // 不可重试错误（鉴权/请求有误）直接返回
+      continue; // 地区/代理相关错误：换下一个代理或模型重试
     }
   }
-  res.end();
-  console.log(`[${row.alias}] ${localId} -> ${row.upstream_model} | ${upstream.status}`);
+
+  const fe = lastErr || { status: 502, text: JSON.stringify({ error: { message: '未知上游错误', type: 'proxy_error' } }) };
+  res.writeHead(fe.status || 502, {
+    'content-type': 'application/json',
+    'x-upstream': row.alias,
+    'x-upstream-model': lastTriedModel,
+    ...(fe.retryAfter ? { 'retry-after': fe.retryAfter } : {}),
+  });
+  res.end(fe.text || JSON.stringify({ error: { message: '未知上游错误', type: 'proxy_error' } }));
+  console.log(`[${row.alias}] ${localId} -> ${lastTriedModel} | ${fe.status} (全部候选失败)`);
 }
 
 const server = http.createServer(async (req, res) => {
