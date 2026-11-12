@@ -746,6 +746,8 @@ async function load() {
   $('#token').value = data.token || '';
   $('#nameTemplate').value = data.nameTemplate || DEFAULT_NAME_TEMPLATE;
   $('#targetPath').value = data.targetPath || '';
+  const tpHint = $('#targetPathHint');
+  if (tpHint) tpHint.textContent = '默认路径：' + (data.defaultModelsPath || '') + '（与 WorkBuddy 安装目录一致，可改）';
   // 直接回填上次生成的片段，不用重新点「生成」
   if (data.lastEntries) {
     try {

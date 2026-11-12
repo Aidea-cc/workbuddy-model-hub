@@ -5,6 +5,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
+const os = require('node:os');
 const { DatabaseSync } = require('node:sqlite');
 const { egressFetch } = require('./egress');
 
@@ -1096,6 +1097,14 @@ const CONFIG_PK = { providers: 'id', channels: 'id', proxies: 'id', settings: 'k
 // 含敏感信息、导出默认保留（整机迁移需要）；脱敏导出时清空
 const SECRET_FIELDS = { providers: ['api_key'], channels: ['api_key'], proxies: ['password'] };
 const SECRET_SETTINGS = ['proxy_token'];
+// 本机专属设置：跨机迁移时不应携带，目标机器用各自默认/缓存（target_path 用各自推导的默认路径）
+const LOCAL_SETTINGS = ['target_path', 'last_entries', 'last_apply', 'migrated_providers_v1'];
+
+// WorkBuddy 客户端 models.json 的默认位置（正常安装后固定为 <用户主目录>/.workbuddy/models.json）
+// 跨机迁移时由目标机器自动推导，无需手动填写
+function defaultModelsPath() {
+  return path.join(os.homedir(), '.workbuddy', 'models.json');
+}
 
 function tableColumns(table) {
   return db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
@@ -1118,7 +1127,7 @@ function dumpConfig(includeSecrets) {
     providers: readTableRaw('providers'),
     channels: readTableRaw('channels'),
     proxies: readTableRaw('proxies'),
-    settings: readTableRaw('settings'),
+    settings: readTableRaw('settings').filter((r) => !LOCAL_SETTINGS.includes(r.key)),
   };
   if (!includeSecrets) {
     for (const t of ['providers', 'channels', 'proxies']) {
@@ -1155,6 +1164,7 @@ function importConfig(cfg, mode) {
     db.exec('BEGIN');
     try {
       for (const row of rows) {
+        if (t === 'settings' && LOCAL_SETTINGS.includes(row.key)) { skipped++; continue; }
         if (!row || row[pk] === undefined || row[pk] === null || row[pk] === '') { skipped++; continue; }
         const vals = cols.map((c) => (row[c] === undefined ? null : row[c]));
         stmt.run(...vals);
@@ -1177,7 +1187,8 @@ async function handleApi(req, res, pathname) {
     return json(res, 200, {
       providers: readProviders(), channels: readChannels(), proxies: readProxies(),
       token: getSetting('proxy_token', ''), nameTemplate: nameTemplate(), port: PORT,
-      targetPath: getSetting('target_path', ''), lastEntries: getSetting('last_entries', ''),
+      targetPath: getSetting('target_path', '') || defaultModelsPath(), defaultModelsPath: defaultModelsPath(),
+      lastEntries: getSetting('last_entries', ''),
       lastApply: safeJson(getSetting('last_apply', ''), null),
     });
   }
@@ -1196,7 +1207,7 @@ async function handleApi(req, res, pathname) {
     if (body.token !== undefined) setSetting('proxy_token', String(body.token));
     return json(res, 200, {
       ok: true, nameTemplate: nameTemplate(),
-      targetPath: getSetting('target_path', ''), entries: buildEntries(),
+      targetPath: getSetting('target_path', '') || defaultModelsPath(), entries: buildEntries(),
     });
   }
   if (pathname === '/api/providers' && method === 'PUT') {

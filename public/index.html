@@ -73,9 +73,10 @@
     </div>
     <div id="exportMsg" class="msg" aria-live="polite"></div>
     <div class="apply">
-      <input id="targetPath" type="text" placeholder="models.json 绝对路径，填过一次会自动记住">
+      <input id="targetPath" type="text" placeholder="models.json 绝对路径，留空则用默认路径">
       <button id="btnApply" class="btn primary">备份并写入</button>
     </div>
+    <p class="hint" id="targetPathHint" style="margin:8px 0 0"></p>
     <div id="applyResult" class="apply-result" aria-live="polite"></div>
 
     <details class="fold out-fold row-toggle" id="outputWrap">
