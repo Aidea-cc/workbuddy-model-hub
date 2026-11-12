@@ -1090,6 +1090,87 @@ function applyModelsFile(target) {
   };
 }
 
+// ---- 配置导入 / 导出：用于整机迁移或备份还原 ----
+const CONFIG_TABLES = ['providers', 'channels', 'proxies', 'settings'];
+const CONFIG_PK = { providers: 'id', channels: 'id', proxies: 'id', settings: 'key' };
+// 含敏感信息、导出默认保留（整机迁移需要）；脱敏导出时清空
+const SECRET_FIELDS = { providers: ['api_key'], channels: ['api_key'], proxies: ['password'] };
+const SECRET_SETTINGS = ['proxy_token'];
+
+function tableColumns(table) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+}
+
+function readTableRaw(table) {
+  return db.prepare(`SELECT * FROM ${table}`).all();
+}
+
+// 导出当前配置为 JSON。includeSecrets=false 时清空密钥/密码/本地令牌，便于安全分享
+function dumpConfig(includeSecrets) {
+  const out = {
+    _meta: {
+      app: 'workbuddy-model-hub',
+      schema: 1,
+      exportedAt: new Date().toISOString(),
+      includesSecrets: Boolean(includeSecrets),
+      note: '本文件等价于 channels.db，含服务商密钥、代理密码与本地令牌，请勿分享。导入即可在新机器还原全部配置。',
+    },
+    providers: readTableRaw('providers'),
+    channels: readTableRaw('channels'),
+    proxies: readTableRaw('proxies'),
+    settings: readTableRaw('settings'),
+  };
+  if (!includeSecrets) {
+    for (const t of ['providers', 'channels', 'proxies']) {
+      const fields = SECRET_FIELDS[t];
+      if (!fields) continue;
+      out[t] = out[t].map((r) => {
+        const x = { ...r };
+        for (const f of fields) if (f in x) x[f] = '';
+        return x;
+      });
+    }
+    out.settings = out.settings.map((r) => (SECRET_SETTINGS.includes(r.key) ? { ...r, value: '' } : r));
+  }
+  return out;
+}
+
+// 导入配置。mode=replace 会先清空四张表（需 __confirmReplace 二次确认），否则按主键 upsert
+function importConfig(cfg, mode) {
+  const result = { imported: {}, skipped: {} };
+  const replace = mode === 'replace';
+  if (replace) {
+    if (!cfg.__confirmReplace) {
+      throw new Error('replace 模式需提供 __confirmReplace: true（将清空现有服务商/渠道/代理/设置后导入）');
+    }
+    for (const t of CONFIG_TABLES) db.prepare(`DELETE FROM ${t}`).run();
+  }
+  for (const t of CONFIG_TABLES) {
+    const rows = Array.isArray(cfg[t]) ? cfg[t] : [];
+    const cols = tableColumns(t);
+    const pk = CONFIG_PK[t];
+    const stmt = db.prepare(`INSERT OR REPLACE INTO ${t} (${cols.map((c) => '`' + c + '`').join(',')}) VALUES (${cols.map(() => '?').join(',')})`);
+    let imported = 0;
+    let skipped = 0;
+    db.exec('BEGIN');
+    try {
+      for (const row of rows) {
+        if (!row || row[pk] === undefined || row[pk] === null || row[pk] === '') { skipped++; continue; }
+        const vals = cols.map((c) => (row[c] === undefined ? null : row[c]));
+        stmt.run(...vals);
+        imported++;
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    result.imported[t] = imported;
+    result.skipped[t] = skipped;
+  }
+  return result;
+}
+
 async function handleApi(req, res, pathname) {
   const method = req.method;
   if (pathname === '/api/state' && method === 'GET') {
@@ -1171,6 +1252,39 @@ async function handleApi(req, res, pathname) {
     };
     setSetting('last_apply', JSON.stringify(lastApply));
     return json(res, 200, { ok: true, ...result, lastApply });
+  }
+  // 导出配置：GET 直接触发浏览器下载（含密钥，整机迁移用）
+  if (pathname === '/api/config/export' && method === 'GET') {
+    const u = new URL(req.url, 'http://localhost');
+    const includeSecrets = u.searchParams.get('secrets') !== '0'; // 默认含密钥
+    const cfg = dumpConfig(includeSecrets);
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-disposition': `attachment; filename="modelhub-config-${stamp}.json"`,
+      'cache-control': 'no-store',
+    });
+    return res.end(JSON.stringify(cfg, null, 2));
+  }
+  // 导入配置：POST JSON，merge=按主键 upsert（默认），replace=清空后全量写入（需二次确认）
+  if (pathname === '/api/config/import' && method === 'POST') {
+    const u = new URL(req.url, 'http://localhost');
+    const mode = u.searchParams.get('mode') === 'replace' ? 'replace' : 'merge';
+    let cfg;
+    try { cfg = JSON.parse(await readBody(req)); } catch { return json(res, 400, { error: '请求体不是合法 JSON' }); }
+    if (!cfg || typeof cfg !== 'object') return json(res, 400, { error: '配置格式不正确' });
+    if (cfg._meta && cfg._meta.app && cfg._meta.app !== 'workbuddy-model-hub') {
+      return json(res, 400, { error: '文件非本工具导出的配置（_meta.app 不匹配）' });
+    }
+    if (!cfg.providers && !cfg.channels && !cfg.proxies && !cfg.settings) {
+      return json(res, 400, { error: '配置中未找到 providers / channels / proxies / settings 任意一项' });
+    }
+    try {
+      const result = importConfig(cfg, mode);
+      return json(res, 200, { ok: true, mode, includesSecrets: !!(cfg._meta && cfg._meta.includesSecrets), ...result });
+    } catch (err) {
+      return json(res, 400, { error: err.message });
+    }
   }
   return json(res, 404, { error: '未知接口' });
 }

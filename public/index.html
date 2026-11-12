@@ -100,6 +100,31 @@
     </details>
   </section>
 
+  <section class="card" id="cfgSection">
+    <div class="card-head">
+      <h2><span class="step">03</span>配置备份与迁移</h2>
+      <div class="actions">
+        <a id="btnExportCfg" class="btn primary small" href="/api/config/export?secrets=1" download>导出配置</a>
+        <button id="btnImportCfg" class="btn ghost small">导入配置</button>
+      </div>
+    </div>
+    <div id="cfgMsg" class="msg" aria-live="polite"></div>
+    <p class="hint" style="margin:0 0 12px">把全部服务商、渠道、代理与全局设置打包成 JSON，方便在新电脑（clone 后先启动一次服务建库）或重装后一键还原。默认导出<strong>含密钥</strong>，文件等同于 channels.db，请勿分享；勾选下方可导出脱敏版本（密钥留空，需手动补填）。</p>
+    <label class="cfg-row"><input type="checkbox" id="cfgNoSecrets"> 脱敏导出（清空 API Key / 代理密码 / 本地令牌）</label>
+    <div id="importPanel" class="apply" hidden>
+      <input id="cfgFile" type="file" accept="application/json,.json" style="margin-bottom:8px">
+      <div class="cfg-row">
+        <label for="cfgMode">导入方式</label>
+        <select id="cfgMode">
+          <option value="merge">合并（按主键更新已有、补入新增，不删除现有条目）</option>
+          <option value="replace">覆盖（先清空四张表再全量写入，需二次确认）</option>
+        </select>
+      </div>
+      <label class="cfg-row" id="cfgConfirmWrap" hidden><input type="checkbox" id="cfgConfirm"> 我已备份当前配置，确认清空后导入</label>
+      <button id="btnDoImport" class="btn primary">导入选中的文件</button>
+    </div>
+  </section>
+
   <details class="card help-card proxy-card row-toggle" id="proxyCard">
     <summary><span class="step ghost-step">⇄</span>网络代理（默认直连，按需展开）<span class="fold-note" id="proxyCount"></span></summary>
     <p class="hint" style="margin:0 0 12px">所有服务商默认本地直连。<strong>仅添加代理不会生效</strong>：还要在服务商卡片把「网络出口」设为指定代理或代理池轮询，或在这里展开某条代理点「应用到此组」。同组模型共用一个出口；代理凭据保存在 <code>channels.db</code>，请勿分享。整张卡片标题、每条代理整行都可点击展开 / 收起。</p>

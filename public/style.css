@@ -216,6 +216,9 @@ code { background: #eef1f5; padding: 1px 5px; border-radius: 4px; font-size: 12p
   min-width: 210px; max-width: 320px;
 }
 .name-style-row input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.cfg-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; color: var(--text); }
+.cfg-row select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; font: 13px/1.4 inherit; color: var(--text); background: #fff; outline: none; }
+.cfg-row select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .standalone-wrap { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
 .standalone-wrap h3 { margin: 0 0 10px; font-size: 14px; font-weight: 500; }
 

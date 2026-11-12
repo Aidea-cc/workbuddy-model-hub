@@ -1297,6 +1297,56 @@ $('#btnApply').addEventListener('click', async () => {
   }
 });
 
+// ---- 配置导入 / 导出 ----
+const CFG_TABLES = ['providers', 'channels', 'proxies', 'settings'];
+function setExportHref() {
+  $('#btnExportCfg').href = $('#cfgNoSecrets').checked
+    ? '/api/config/export?secrets=0' : '/api/config/export?secrets=1';
+}
+setExportHref();
+$('#cfgNoSecrets').addEventListener('change', setExportHref);
+
+$('#btnImportCfg').addEventListener('click', () => {
+  const panel = $('#importPanel');
+  panel.hidden = !panel.hidden;
+});
+
+$('#cfgMode').addEventListener('change', () => {
+  $('#cfgConfirmWrap').hidden = $('#cfgMode').value !== 'replace';
+});
+
+$('#btnDoImport').addEventListener('click', async () => {
+  const fileInput = $('#cfgFile');
+  const file = fileInput.files && fileInput.files[0];
+  if (!file) return showMsg('请先选择导出的配置文件', 'err', '#cfgMsg');
+  const mode = $('#cfgMode').value;
+  if (mode === 'replace' && !$('#cfgConfirm').checked) {
+    return showMsg('覆盖导入需先勾选确认框', 'err', '#cfgMsg');
+  }
+  const btn = $('#btnDoImport');
+  btn.disabled = true;
+  btn.textContent = '导入中…';
+  try {
+    const text = await file.text();
+    const cfg = JSON.parse(text);
+    if (mode === 'replace') cfg.__confirmReplace = true;
+    const r = await api('/api/config/import?mode=' + mode, 'POST', cfg);
+    const sum = CFG_TABLES.map((t) => {
+      const imp = (r.imported && r.imported[t]) || 0;
+      const skip = (r.skipped && r.skipped[t]) || 0;
+      return `${t} 导入 ${imp}${skip ? `、跳过 ${skip}` : ''}`;
+    }).join('； ');
+    await load();
+    showMsg(`导入完成（${mode}${r.includesSecrets ? '，含密钥' : '，已脱敏'}）：${sum}`, 'ok', '#cfgMsg');
+    fileInput.value = '';
+  } catch (err) {
+    showMsg('导入失败：' + err.message, 'err', '#cfgMsg');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '导入选中的文件';
+  }
+});
+
 load().catch((err) => {
   setStatus(false);
   showMsg('加载配置失败：' + err.message, 'err');
