@@ -9,6 +9,10 @@ const os = require('node:os');
 const { DatabaseSync } = require('node:sqlite');
 const { egressFetch } = require('./egress');
 
+// 项目名（用于导出配置文件名前缀，与 package.json 的 name 保持一致）
+let PROJECT_NAME = 'workbuddy-model-hub';
+try { const pkg = require('./package.json'); if (pkg && pkg.name) PROJECT_NAME = pkg.name; } catch { /* 无 package.json 时回退默认名 */ }
+
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
 const PORT = Number(process.env.PORT || 8787);
@@ -1272,7 +1276,7 @@ async function handleApi(req, res, pathname) {
     const stamp = new Date().toISOString().slice(0, 10);
     res.writeHead(200, {
       'content-type': 'application/json; charset=utf-8',
-      'content-disposition': `attachment; filename="modelhub-config-${stamp}.json"`,
+      'content-disposition': `attachment; filename="${PROJECT_NAME}-config-${stamp}.json"`,
       'cache-control': 'no-store',
     });
     return res.end(JSON.stringify(cfg, null, 2));
